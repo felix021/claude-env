@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.swp
+*.swo
+.DS_Store
+.pytest_cache/
+.coverage
+dist/
+build/
+*.egg-info/
+
+AGENTS.md
