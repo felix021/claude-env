@@ -94,6 +94,8 @@ Run a provider:
 claude-env run glm -p "Reply with exactly: OK"
 ```
 
+If the `env` section in `~/.claude/settings.json` contains `ANTHROPIC_BASE_URL` or `ANTHROPIC_AUTH_TOKEN`, `claude-env run` refuses to start. Claude Code reads those settings and may override the provider environment variables set by `claude-env`, so remove those two keys from settings.json first.
+
 Use the shortcut:
 
 ```bash

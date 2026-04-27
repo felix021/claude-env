@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import shutil
 import subprocess
@@ -10,6 +11,9 @@ from pathlib import Path
 
 from .store import Provider, Store
 from .wrapper import validate_provider_name
+
+
+PROVIDER_ENV_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,6 +104,11 @@ def handle_run(args: argparse.Namespace) -> int:
     provider = store.get_provider(name)
     if provider is None:
         print(f"provider {name!r} is not configured", file=sys.stderr)
+        return 1
+
+    conflict_error = claude_settings_env_error(paths["home"])
+    if conflict_error:
+        print(conflict_error, file=sys.stderr)
         return 1
 
     claude_args = list(args.claude_args)
@@ -255,3 +264,32 @@ def resolve_claude(env: dict[str, str]) -> str:
         if found:
             return found
     return "claude"
+
+
+def claude_settings_env_error(home: Path) -> str | None:
+    settings_path = home / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return None
+    try:
+        with settings_path.open("r", encoding="utf-8-sig") as f:
+            settings = json.load(f)
+    except json.JSONDecodeError as exc:
+        return (
+            f"error: cannot parse {settings_path}: {exc}. "
+            "claude-env will not start because Claude Code settings may override provider env."
+        )
+
+    env_section = settings.get("env") if isinstance(settings, dict) else None
+    if not isinstance(env_section, dict):
+        return None
+
+    conflicts = [key for key in PROVIDER_ENV_KEYS if key in env_section]
+    if not conflicts:
+        return None
+
+    keys = ", ".join(conflicts)
+    return (
+        f"error: {settings_path} env sets {keys}. "
+        "Remove these keys before using claude-env; Claude Code settings can override "
+        "the provider environment variables set by claude-env."
+    )

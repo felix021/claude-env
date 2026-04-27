@@ -94,6 +94,8 @@ claude-env list
 claude-env run glm -p "Reply with exactly: OK"
 ```
 
+如果 `~/.claude/settings.json` 的 `env` 字段包含 `ANTHROPIC_BASE_URL` 或 `ANTHROPIC_AUTH_TOKEN`，`claude-env run` 会拒绝启动。Claude Code 会读取这些设置并可能覆盖 `claude-env` 设置的 Provider 环境变量，所以请先从 settings.json 中移除这两个键。
+
 也可以使用快捷命令:
 
 ```bash

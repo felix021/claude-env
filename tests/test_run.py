@@ -185,6 +185,86 @@ class RunTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "OK")
 
+    def test_run_refuses_when_claude_settings_env_overrides_provider_env(self):
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            bin_dir = home / "fake-bin"
+            bin_dir.mkdir()
+            write_fake_claude(bin_dir)
+            settings_dir = home / ".claude"
+            settings_dir.mkdir()
+            (settings_dir / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://wrong.example",
+                            "ANTHROPIC_AUTH_TOKEN": "wrong-token",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            add = self.run_cli(
+                home,
+                [
+                    "add",
+                    "glm",
+                    "--url",
+                    provider.url,
+                    "--token",
+                    "test-token",
+                    "--model",
+                    "glm-5-turbo",
+                    "-y",
+                ],
+                path_prefix=bin_dir,
+            )
+            self.assertEqual(add.returncode, 0, add.stderr)
+
+            result = self.run_cli(home, ["run", "glm", "-p", "hello"], path_prefix=bin_dir)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(provider.requests, [])
+            self.assertIn("settings.json", result.stderr)
+            self.assertIn("ANTHROPIC_BASE_URL", result.stderr)
+            self.assertIn("ANTHROPIC_AUTH_TOKEN", result.stderr)
+            self.assertNotIn("wrong-token", result.stderr)
+            self.assertNotIn("test-token", result.stderr)
+
+    def test_run_allows_unrelated_claude_settings_env_keys(self):
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            bin_dir = home / "fake-bin"
+            bin_dir.mkdir()
+            write_fake_claude(bin_dir)
+            settings_dir = home / ".claude"
+            settings_dir.mkdir()
+            (settings_dir / "settings.json").write_text(
+                json.dumps({"env": {"SOME_OTHER_KEY": "value"}}),
+                encoding="utf-8",
+            )
+            add = self.run_cli(
+                home,
+                [
+                    "add",
+                    "glm",
+                    "--url",
+                    provider.url,
+                    "--token",
+                    "test-token",
+                    "--model",
+                    "glm-5-turbo",
+                    "-y",
+                ],
+                path_prefix=bin_dir,
+            )
+            self.assertEqual(add.returncode, 0, add.stderr)
+
+            result = self.run_cli(home, ["run", "glm", "-p", "hello"], path_prefix=bin_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "OK")
+
 
 if __name__ == "__main__":
     unittest.main()
