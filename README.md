@@ -80,7 +80,7 @@ claude-env add glm \
   --model "glm-5-turbo"
 ```
 
-如果省略 `--url` 或 `--token`，命令会交互式询问；Token 输入不会回显。
+如果省略 `--url` 或 `--token`，命令会交互式询问；Token 输入不会回显。如果省略 `--model`，命令也会询问默认模型；直接回车表示不设置默认模型，运行时使用 Provider 自己的默认模型选择。
 
 查看配置:
 

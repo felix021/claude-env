@@ -80,7 +80,7 @@ claude-env add glm \
   --model "glm-5-turbo"
 ```
 
-If `--url` or `--token` is omitted, the command prompts interactively. Token input is hidden.
+If `--url` or `--token` is omitted, the command prompts interactively. Token input is hidden. If `--model` is omitted, the command also asks for an optional default model; press Enter to leave it unset and use the provider's own default model selection at runtime.
 
 List profiles:
 

@@ -73,7 +73,7 @@ class CliTests(unittest.TestCase):
             code, stdout, stderr = self.run_cli(
                 ["add", "qwen", "-y"],
                 home=home,
-                input_text="https://provider.example/v1\nprompt-token\n",
+                input_text="https://provider.example/v1\nprompt-token\n\n",
             )
 
             self.assertEqual(code, 0, stderr)
@@ -83,18 +83,39 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("prompt-token", content)
             self.assertNotIn("prompt-token", stdout)
 
+            code, stdout, stderr = self.run_cli(["list"], home=home)
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("qwen", stdout)
+            self.assertIn("\t-\t", stdout)
+
+    def test_add_prompts_for_missing_default_model(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                ["add", "qwen", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="qwen3.6-plus\n",
+            )
+
+            self.assertEqual(code, 0, stderr)
+            code, stdout, stderr = self.run_cli(["list"], home=home)
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("qwen3.6-plus", stdout)
+
     def test_add_refuses_overwrite_without_confirmation(self):
         with TemporaryDirectory() as temp:
             home = Path(temp)
             self.run_cli(
                 ["add", "glm", "--url", "https://one.example", "--token", "one", "-y"],
                 home=home,
+                input_text="\n",
             )
 
             code, stdout, stderr = self.run_cli(
                 ["add", "glm", "--url", "https://two.example", "--token", "two"],
                 home=home,
-                input_text="n\n",
+                input_text="\nn\n",
             )
 
             self.assertEqual(code, 1)
@@ -106,6 +127,7 @@ class CliTests(unittest.TestCase):
             self.run_cli(
                 ["add", "glm", "--url", "https://provider.example", "--token", "token", "-y"],
                 home=home,
+                input_text="\n",
             )
 
             code, stdout, stderr = self.run_cli(["rm", "glm", "-y"], home=home)

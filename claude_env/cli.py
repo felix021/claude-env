@@ -63,6 +63,11 @@ def handle_add(args: argparse.Namespace) -> int:
     name = validate_provider_name(args.name)
     base_url = args.url or input("Provider base URL: ").strip()
     token = args.token or getpass.getpass("Provider token: ").strip()
+    default_model = args.model
+    if default_model is None:
+        default_model = input(
+            "Default model (optional, press Enter to use provider default): "
+        ).strip() or None
     if not base_url:
         print("error: provider base URL is required", file=sys.stderr)
         return 2
@@ -87,7 +92,7 @@ def handle_add(args: argparse.Namespace) -> int:
             name=name,
             base_url=base_url,
             token=token,
-            default_model=args.model,
+            default_model=default_model,
             wrapper_path=str(wrapper_path),
         )
     )
