@@ -9,8 +9,6 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Provider:
     name: str
-    base_url: str
-    token: str
     default_model: str | None
     wrapper_path: str
 
@@ -27,8 +25,6 @@ class Store:
             return None
         return Provider(
             name=name,
-            base_url=item["base_url"],
-            token=item["token"],
             default_model=item.get("default_model"),
             wrapper_path=item["wrapper_path"],
         )
@@ -38,8 +34,6 @@ class Store:
         return [
             Provider(
                 name=name,
-                base_url=item["base_url"],
-                token=item["token"],
                 default_model=item.get("default_model"),
                 wrapper_path=item["wrapper_path"],
             )
@@ -49,12 +43,10 @@ class Store:
     def save_provider(self, provider: Provider) -> None:
         data = self._read()
         data["providers"][provider.name] = {
-            "base_url": provider.base_url,
-            "token": provider.token,
             "default_model": provider.default_model,
             "wrapper_path": provider.wrapper_path,
             "managed_by": "claude-env",
-            "version": 1,
+            "version": 2,
         }
         self._write(data)
 

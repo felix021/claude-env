@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-`claude-env` is a small Claude Code provider profile manager. It stores `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and an optional default model for each Claude-compatible provider, then runs Claude Code through `claude-env run <name>` or shortcut commands such as `claude-<name>`.
+`claude-env` is a small Claude Code provider profile manager. It stores `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and an optional default model for each Claude-compatible provider, then runs Claude Code through `claude --settings` to inject provider credentials at runtime via `claude-env run <name>` or shortcut commands such as `claude-<name>`.
 
 Shortcuts do not contain URLs or tokens. Sensitive values live in the local config file, and `list` redacts tokens.
 
@@ -94,7 +94,7 @@ Run a provider:
 claude-env run glm -p "Reply with exactly: OK"
 ```
 
-If the `env` section in `~/.claude/settings.json` contains `ANTHROPIC_BASE_URL` or `ANTHROPIC_AUTH_TOKEN`, `claude-env run` refuses to start. Claude Code reads those settings and may override the provider environment variables set by `claude-env`, so remove those two keys from settings.json first.
+The command passes provider credentials via `claude --settings`, which overrides any conflicting values in `~/.claude/settings.json`.
 
 Use the shortcut:
 

@@ -17,10 +17,20 @@ def write_fake_claude(bin_dir: Path) -> None:
         "args = sys.argv[1:]\n"
         "model = None\n"
         "prompt = ''\n"
+        "settings_env = {}\n"
         "i = 0\n"
         "while i < len(args):\n"
         "    arg = args[i]\n"
-        "    if arg == '--model':\n"
+        "    if arg == '--settings':\n"
+        "        val = args[i + 1]\n"
+        "        with open(val) as f:\n"
+        "            settings_env = json.load(f).get('env', {})\n"
+        "        i += 2\n"
+        "    elif arg.startswith('--settings='):\n"
+        "        with open(arg[len('--settings='):]) as f:\n"
+        "            settings_env = json.load(f).get('env', {})\n"
+        "        i += 1\n"
+        "    elif arg == '--model':\n"
         "        model = args[i + 1]\n"
         "        i += 2\n"
         "    elif arg.startswith('--model='):\n"
@@ -31,13 +41,15 @@ def write_fake_claude(bin_dir: Path) -> None:
         "    else:\n"
         "        prompt = arg\n"
         "        i += 1\n"
+        "base_url = settings_env.get('ANTHROPIC_BASE_URL', '')\n"
+        "token = settings_env.get('ANTHROPIC_AUTH_TOKEN', '')\n"
         "body = json.dumps({'model': model, 'messages': [{'role': 'user', 'content': prompt}]}).encode()\n"
         "req = urllib.request.Request(\n"
-        "    os.environ['ANTHROPIC_BASE_URL'],\n"
+        "    base_url,\n"
         "    data=body,\n"
         "    headers={\n"
         "        'content-type': 'application/json',\n"
-        "        'x-api-key': os.environ['ANTHROPIC_AUTH_TOKEN'],\n"
+        "        'x-api-key': token,\n"
         "    },\n"
         "    method='POST',\n"
         ")\n"
@@ -47,18 +59,28 @@ def write_fake_claude(bin_dir: Path) -> None:
         encoding="utf-8",
     )
     fake.chmod(0o755)
+    # On Windows, also create a .cmd wrapper so shutil.which("claude") finds it
+    if os.name == "nt":
+        cmd_wrapper = bin_dir / "claude.cmd"
+        cmd_wrapper.write_text(
+            f'@python "{fake}" %*\r\n',
+            encoding="utf-8",
+        )
 
 
 class RunTests(unittest.TestCase):
     def run_cli(self, home: Path, argv: list[str], *, path_prefix: Path) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        path_sep = ";" if os.name == "nt" else ":"
         env.update(
             {
                 "CLAUDE_ENV_HOME": str(home),
                 "CLAUDE_ENV_BIN_DIR": str(home / ".local" / "bin"),
                 "CLAUDE_ENV_CONFIG_DIR": str(home / ".config" / "claude-env"),
-                "PATH": f"{path_prefix}:{env['PATH']}",
+                "PATH": f"{path_prefix}{path_sep}{env['PATH']}",
                 "PYTHONDONTWRITEBYTECODE": "1",
+                # Bypass system proxy for mock provider on localhost
+                "NO_PROXY": "127.0.0.1,localhost",
             }
         )
         return subprocess.run(
@@ -69,6 +91,7 @@ class RunTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            encoding="utf-8",
         )
 
     def test_run_uses_config_env_and_default_model_with_mock_provider(self):
@@ -155,6 +178,8 @@ class RunTests(unittest.TestCase):
             )
             self.assertEqual(add.returncode, 0, add.stderr)
             shortcut = home / ".local" / "bin" / "claude-glm"
+            suffix = ".cmd" if os.name == "nt" else ""
+            shortcut = shortcut.parent / f"{shortcut.name}{suffix}"
             if shortcut.is_symlink():
                 shortcut_text = ""
             else:
@@ -162,35 +187,40 @@ class RunTests(unittest.TestCase):
             self.assertNotIn(provider.url, shortcut_text)
             self.assertNotIn("test-token", shortcut_text)
 
+            path_sep = ";" if os.name == "nt" else ":"
             env = os.environ.copy()
             env.update(
                 {
                     "CLAUDE_ENV_HOME": str(home),
                     "CLAUDE_ENV_BIN_DIR": str(home / ".local" / "bin"),
                     "CLAUDE_ENV_CONFIG_DIR": str(home / ".config" / "claude-env"),
-                    "PATH": f"{fake_bin}:{home / '.local' / 'bin'}:{env['PATH']}",
+                    "PATH": f"{fake_bin}{path_sep}{home / '.local' / 'bin'}{path_sep}{env['PATH']}",
                     "PYTHONDONTWRITEBYTECODE": "1",
+                    "NO_PROXY": "127.0.0.1,localhost",
                 }
             )
+            # Capture bytes and decode to handle Windows console encoding (GBK/CP437)
             result = subprocess.run(
                 [str(shortcut), "-p", "hello"],
                 cwd=Path(__file__).resolve().parents[1],
                 env=env,
-                text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
             )
+            stdout = result.stdout.decode("utf-8", errors="replace")
+            stderr = result.stderr.decode("utf-8", errors="replace")
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "OK")
+            self.assertEqual(result.returncode, 0, stderr)
+            self.assertEqual(stdout.strip(), "OK")
 
-    def test_run_refuses_when_claude_settings_env_overrides_provider_env(self):
+    def test_run_overrides_conflicting_global_settings_env(self):
         with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
             home = Path(temp)
             bin_dir = home / "fake-bin"
             bin_dir.mkdir()
             write_fake_claude(bin_dir)
+            # Global settings has conflicting (wrong) creds
             settings_dir = home / ".claude"
             settings_dir.mkdir()
             (settings_dir / "settings.json").write_text(
@@ -221,15 +251,12 @@ class RunTests(unittest.TestCase):
             )
             self.assertEqual(add.returncode, 0, add.stderr)
 
+            # Should still work -- settings via --settings overrides global
             result = self.run_cli(home, ["run", "glm", "-p", "hello"], path_prefix=bin_dir)
 
-            self.assertEqual(result.returncode, 1)
-            self.assertEqual(provider.requests, [])
-            self.assertIn("settings.json", result.stderr)
-            self.assertIn("ANTHROPIC_BASE_URL", result.stderr)
-            self.assertIn("ANTHROPIC_AUTH_TOKEN", result.stderr)
-            self.assertNotIn("wrong-token", result.stderr)
-            self.assertNotIn("test-token", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "OK")
+            self.assertEqual(provider.requests[0]["headers"]["X-Api-Key"], "test-token")
 
     def test_run_allows_unrelated_claude_settings_env_keys(self):
         with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:

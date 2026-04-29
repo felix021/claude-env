@@ -70,6 +70,19 @@ $PythonCommand -m claude_env %*
 Set-Content -Path $Target -Value $Launcher -Encoding ASCII
 
 Write-Output "installed $Target"
+
+# Run one-time storage migration (v1 -> v2: move url/token from providers.json to env/)
+$Env:CLAUDE_ENV_HOME = $HomeDir
+$migrateScript = "import sys; sys.path.insert(0, '$AppDir'); from claude_env.cli import migrate_storage_v1_to_v2; migrate_storage_v1_to_v2()"
+$Py = Get-Command py -ErrorAction SilentlyContinue
+if ($Py) {
+    & py -3 -c $migrateScript 2>$null
+} else {
+    $Python = Get-Command python -ErrorAction SilentlyContinue
+    if ($Python) {
+        & python -c $migrateScript 2>$null
+    }
+}
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $PathEntries = @()
 if ($UserPath) {

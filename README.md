@@ -2,7 +2,7 @@
 
 中文 | [English](README.en.md)
 
-`claude-env` 是一个轻量级 Claude Code Provider 配置管理工具。它可以为不同的 Claude-compatible Provider 保存 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和默认模型，并通过 `claude-env run <name>` 或 `claude-<name>` 快捷命令启动 Claude Code。
+`claude-env` 是一个轻量级 Claude Code Provider 配置管理工具。它可以为不同的 Claude-compatible Provider 保存 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和默认模型，并通过 `claude --settings` 注入 Provider 凭据，运行时通过 `claude-env run <name>` 或 `claude-<name>` 快捷命令启动 Claude Code。
 
 快捷命令本身不保存 URL 或 Token；敏感配置只保存在本地配置文件中，`list` 输出会隐藏 Token。
 
@@ -94,7 +94,7 @@ claude-env list
 claude-env run glm -p "Reply with exactly: OK"
 ```
 
-如果 `~/.claude/settings.json` 的 `env` 字段包含 `ANTHROPIC_BASE_URL` 或 `ANTHROPIC_AUTH_TOKEN`，`claude-env run` 会拒绝启动。Claude Code 会读取这些设置并可能覆盖 `claude-env` 设置的 Provider 环境变量，所以请先从 settings.json 中移除这两个键。
+该命令会通过 `claude --settings` 注入 Provider 的凭据，覆盖 `~/.claude/settings.json` 中可能存在的冲突值。
 
 也可以使用快捷命令:
 
@@ -150,4 +150,4 @@ Windows:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v
 ```
 
-测试包含一个 mock Anthropic-compatible Provider，用于验证 `run` 的环境变量注入、默认模型注入和运行时模型覆盖，不依赖真实 API。
+测试包含一个 mock Anthropic-compatible Provider，用于验证 `run` 的 `--settings` 注入、默认模型注入和运行时模型覆盖，不依赖真实 API。

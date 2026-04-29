@@ -14,8 +14,6 @@ class StoreTests(unittest.TestCase):
             store = Store(config_dir=config_dir)
             provider = Provider(
                 name="glm",
-                base_url="https://provider.example/v1",
-                token="token",
                 default_model="glm-5.1",
                 wrapper_path="/tmp/bin/claude-glm",
             )
@@ -33,6 +31,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(data["providers"], {})
 
     def test_metadata_file_is_owner_readable_only(self):
+        import os
         with TemporaryDirectory() as temp:
             config_dir = Path(temp) / "config"
             store = Store(config_dir=config_dir)
@@ -40,15 +39,15 @@ class StoreTests(unittest.TestCase):
             store.save_provider(
                 Provider(
                     name="qwen",
-                    base_url="https://provider.example/v1",
-                    token="token",
                     default_model=None,
                     wrapper_path="/tmp/bin/claude-qwen",
                 )
             )
 
             mode = stat.S_IMODE((config_dir / "providers.json").stat().st_mode)
-            self.assertEqual(mode, 0o600)
+            # On Windows, chmod doesn't restrict permissions (ACLs used instead)
+            if os.name == "posix":
+                self.assertEqual(mode, 0o600)
 
     def test_loads_metadata_with_utf8_bom(self):
         with TemporaryDirectory() as temp:
@@ -57,11 +56,9 @@ class StoreTests(unittest.TestCase):
             (config_dir / "providers.json").write_text(
                 json.dumps(
                     {
-                        "version": 1,
+                        "version": 2,
                         "providers": {
                             "glm": {
-                                "base_url": "https://provider.example",
-                                "token": "token",
                                 "default_model": "glm-5-turbo",
                                 "wrapper_path": "/tmp/claude-glm",
                             }

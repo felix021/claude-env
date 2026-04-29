@@ -12,8 +12,7 @@ from pathlib import Path
 from .store import Provider, Store
 from .wrapper import validate_provider_name
 
-
-PROVIDER_ENV_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
+from . import __version__
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,6 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_cmd = subparsers.add_parser("list", help="list managed provider wrappers")
     list_cmd.set_defaults(handler=handle_list)
+
+    version_cmd = subparsers.add_parser("version", help="print claude-env version")
+    version_cmd.set_defaults(handler=handle_version)
+
     return parser
 
 
@@ -90,12 +93,12 @@ def handle_add(args: argparse.Namespace) -> int:
     store.save_provider(
         Provider(
             name=name,
-            base_url=base_url,
-            token=token,
             default_model=default_model,
             wrapper_path=str(wrapper_path),
         )
     )
+
+    _write_settings_file(paths["config_dir"], name, base_url, token)
 
     action = "updated" if existing else "created"
     print(f"{action} {wrapper_path}")
@@ -111,22 +114,19 @@ def handle_run(args: argparse.Namespace) -> int:
         print(f"provider {name!r} is not configured", file=sys.stderr)
         return 1
 
-    conflict_error = claude_settings_env_error(paths["home"])
-    if conflict_error:
-        print(conflict_error, file=sys.stderr)
+    settings_path = settings_env_path(paths["config_dir"], name)
+    if not settings_path.exists():
+        print(f"error: credentials file {settings_path} not found", file=sys.stderr)
         return 1
 
     claude_args = list(args.claude_args)
     if provider.default_model and not has_model_arg(claude_args):
         claude_args = ["--model", provider.default_model, *claude_args]
 
-    env = os.environ.copy()
-    env["ANTHROPIC_BASE_URL"] = provider.base_url
-    env["ANTHROPIC_AUTH_TOKEN"] = provider.token
-    command = [resolve_claude(env), *claude_args]
+    command = [resolve_claude(), "--settings", str(settings_path), *claude_args]
     if is_windows() or os.environ.get("CLAUDE_ENV_EXEC_MODE") == "subprocess":
-        return subprocess.call(command, env=env)
-    os.execvpe("claude", command, env)
+        return subprocess.call(command)
+    os.execvp("claude", command)
     return 127
 
 
@@ -152,6 +152,9 @@ def handle_remove(args: argparse.Namespace) -> int:
 
     if managed_path.exists():
         managed_path.unlink()
+    settings_path = settings_env_path(paths["config_dir"], name)
+    if settings_path.exists():
+        settings_path.unlink()
     store.remove_provider(name)
     print(f"removed {managed_path}")
     return 0
@@ -167,10 +170,22 @@ def handle_list(args: argparse.Namespace) -> int:
     print("NAME\tBASE_URL\tDEFAULT_MODEL\tWRAPPER\tTOKEN")
     for provider in providers:
         model = provider.default_model or "-"
+        settings_path = settings_env_path(paths["config_dir"], provider.name)
+        if settings_path.exists():
+            with settings_path.open("r", encoding="utf-8") as f:
+                settings = json.load(f)
+            base_url = settings.get("env", {}).get("ANTHROPIC_BASE_URL", "-")
+        else:
+            base_url = "-"
         print(
-            f"{provider.name}\t{provider.base_url}\t{model}\t"
+            f"{provider.name}\t{base_url}\t{model}\t"
             f"{provider.wrapper_path}\t***"
         )
+    return 0
+
+
+def handle_version(args: argparse.Namespace) -> int:
+    print(__version__)
     return 0
 
 
@@ -213,7 +228,15 @@ def create_shortcut(path: Path, name: str) -> None:
 
     if is_windows():
         path.write_text(
-            f"@echo off\r\n\"%~dp0claude-env.cmd\" run {name} %*\r\n",
+            f"@echo off\r\n"
+            f"where claude-env.cmd >nul 2>&1\r\n"
+            f"if %%errorlevel%% equ 0 (\r\n"
+            f"  claude-env.cmd run {name} %*\r\n"
+            f") else if exist \"%%~dp0claude-env.cmd\" (\r\n"
+            f"  \"%%~dp0claude-env.cmd\" run {name} %*\r\n"
+            f") else (\r\n"
+            f"  python -m claude_env run {name} %*\r\n"
+            f")\r\n",
             encoding="utf-8",
         )
         return
@@ -260,41 +283,76 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
-def resolve_claude(env: dict[str, str]) -> str:
-    found = shutil.which("claude", path=env.get("PATH"))
+def resolve_claude() -> str:
+    found = shutil.which("claude")
     if found:
         return found
     if is_windows():
-        found = shutil.which("claude.cmd", path=env.get("PATH"))
+        found = shutil.which("claude.cmd")
         if found:
             return found
     return "claude"
 
 
-def claude_settings_env_error(home: Path) -> str | None:
-    settings_path = home / ".claude" / "settings.json"
-    if not settings_path.exists():
-        return None
-    try:
-        with settings_path.open("r", encoding="utf-8-sig") as f:
-            settings = json.load(f)
-    except json.JSONDecodeError as exc:
-        return (
-            f"error: cannot parse {settings_path}: {exc}. "
-            "claude-env will not start because Claude Code settings may override provider env."
-        )
+def settings_env_path(config_dir: Path, name: str) -> Path:
+    env_dir = config_dir / "env"
+    return env_dir / f"settings.{name}.json"
 
-    env_section = settings.get("env") if isinstance(settings, dict) else None
-    if not isinstance(env_section, dict):
-        return None
 
-    conflicts = [key for key in PROVIDER_ENV_KEYS if key in env_section]
-    if not conflicts:
-        return None
+def _write_settings_file(config_dir: Path, name: str, base_url: str, token: str) -> None:
+    env_dir = config_dir / "env"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = settings_env_path(config_dir, name)
+    settings_data = json.dumps({
+        "env": {
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_AUTH_TOKEN": token,
+        }
+    })
+    tmp_path = settings_path.with_suffix(".json.tmp")
+    tmp_path.write_text(settings_data, encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    tmp_path.replace(settings_path)
+    os.chmod(settings_path, 0o600)
 
-    keys = ", ".join(conflicts)
-    return (
-        f"error: {settings_path} env sets {keys}. "
-        "Remove these keys before using claude-env; Claude Code settings can override "
-        "the provider environment variables set by claude-env."
-    )
+
+def migrate_storage_v1_to_v2(config_dir: Path | None = None) -> int:
+    """One-time migration from v1 (url/token in providers.json) to v2 (url/token in env/settings.*.json).
+    Returns 0 on success, 1 if no migration needed, 2 on error.
+    """
+    config_dir = config_dir or get_paths()["config_dir"]
+    store_path = config_dir / "providers.json"
+    if not store_path.exists():
+        return 1
+
+    with store_path.open("r", encoding="utf-8-sig") as f:
+        data = json.load(f)
+
+    if data.get("version", 1) >= 2:
+        return 1
+
+    providers = data.get("providers", {})
+    if not providers:
+        return 1
+
+    migrated = 0
+    for name, item in providers.items():
+        base_url = item.get("base_url")
+        token = item.get("token")
+        if base_url and token:
+            _write_settings_file(config_dir, name, base_url, token)
+            item.pop("base_url", None)
+            item.pop("token", None)
+            item["version"] = 2
+            migrated += 1
+
+    data["version"] = 2
+    tmp_path = store_path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp_path, 0o600)
+    tmp_path.replace(store_path)
+    os.chmod(store_path, 0o600)
+    print(f"migrated {migrated} provider(s) to v2")
+    return 0

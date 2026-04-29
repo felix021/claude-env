@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import unittest
 from pathlib import Path
@@ -7,6 +8,8 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from claude_env.cli import main
+from claude_env import __version__
+from claude_env.cli import main, migrate_storage_v1_to_v2
 
 
 class CliTests(unittest.TestCase):
@@ -48,6 +51,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0, stderr)
             wrapper = home / ".local" / "bin" / "claude-glm"
+            suffix = ".cmd" if os.name == "nt" else ""
+            wrapper = wrapper.parent / f"{wrapper.name}{suffix}"
             self.assertTrue(wrapper.exists())
             if wrapper.is_symlink():
                 wrapper_content = ""
@@ -77,7 +82,8 @@ class CliTests(unittest.TestCase):
             )
 
             self.assertEqual(code, 0, stderr)
-            wrapper = home / ".local" / "bin" / "claude-qwen"
+            suffix = ".cmd" if os.name == "nt" else ""
+            wrapper = home / ".local" / "bin" / f"claude-qwen{suffix}"
             content = "" if wrapper.is_symlink() else wrapper.read_text(encoding="utf-8")
             self.assertNotIn("https://provider.example/v1", content)
             self.assertNotIn("prompt-token", content)
@@ -145,7 +151,8 @@ class CliTests(unittest.TestCase):
             home = Path(temp)
             bin_dir = home / ".local" / "bin"
             bin_dir.mkdir(parents=True)
-            wrapper = bin_dir / "claude-glm"
+            suffix = ".cmd" if os.name == "nt" else ""
+            wrapper = bin_dir / f"claude-glm{suffix}"
             wrapper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
 
             code, stdout, stderr = self.run_cli(["remove", "glm", "-y"], home=home)
@@ -155,6 +162,53 @@ class CliTests(unittest.TestCase):
             self.assertIn("not managed", stderr)
 
     def test_add_creates_cmd_shortcut_on_windows(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            env = {
+                "CLAUDE_ENV_HOME": str(home),
+                "CLAUDE_ENV_BIN_DIR": str(home / ".local" / "bin"),
+                "CLAUDE_ENV_CONFIG_DIR": str(home / ".config" / "claude-env"),
+                "CLAUDE_ENV_PLATFORM": "windows",
+            }
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            stdin = io.StringIO("\n")
+            # Delete CLAUDE_ENV_EXECUTABLE so symlink branch is skipped
+            with mock.patch.dict(os.environ, env, clear=False):
+                os.environ.pop("CLAUDE_ENV_EXECUTABLE", None)
+                with mock.patch("sys.stdin", stdin):
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        code = main([
+                            "add",
+                            "glm",
+                            "--url",
+                            "https://provider.example/v1",
+                            "--token",
+                            "super-secret-token",
+                            "--model",
+                            "glm-5-turbo",
+                            "-y",
+                        ])
+
+            self.assertEqual(code, 0, stderr)
+            shortcut = home / ".local" / "bin" / "claude-glm.cmd"
+            self.assertTrue(shortcut.exists())
+            content = shortcut.read_text(encoding="utf-8")
+            self.assertIn("claude-env.cmd\" run glm %*", content)
+            self.assertNotIn("super-secret-token", content)
+
+    def test_version_prints_version(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(["version"], home=home)
+
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(stdout.strip(), __version__)
+
+    def test_add_creates_settings_file_with_0600_permissions(self):
+        import stat
         with TemporaryDirectory() as temp:
             home = Path(temp)
 
@@ -171,15 +225,96 @@ class CliTests(unittest.TestCase):
                     "-y",
                 ],
                 home=home,
-                extra_env={"CLAUDE_ENV_PLATFORM": "windows"},
             )
 
             self.assertEqual(code, 0, stderr)
-            shortcut = home / ".local" / "bin" / "claude-glm.cmd"
-            self.assertTrue(shortcut.exists())
-            content = shortcut.read_text(encoding="utf-8")
-            self.assertIn("claude-env.cmd\" run glm %*", content)
-            self.assertNotIn("super-secret-token", content)
+            config_dir = home / ".config" / "claude-env"
+            settings_file = config_dir / "env" / "settings.glm.json"
+            self.assertTrue(settings_file.exists())
+            content = json.loads(settings_file.read_text(encoding="utf-8"))
+            self.assertEqual(content["env"]["ANTHROPIC_BASE_URL"], "https://provider.example/v1")
+            self.assertEqual(content["env"]["ANTHROPIC_AUTH_TOKEN"], "super-secret-token")
+            # On Windows, chmod 0o600 doesn't fully restrict permissions (ACLs used instead)
+            if os.name == "posix":
+                mode = settings_file.stat().st_mode
+                self.assertEqual(mode & 0o777, 0o600)
+
+    def test_remove_deletes_settings_file(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+            settings_file = home / ".config" / "claude-env" / "env" / "settings.glm.json"
+            self.assertTrue(settings_file.exists())
+
+            code, stdout, stderr = self.run_cli(["rm", "glm", "-y"], home=home)
+
+            self.assertEqual(code, 0, stderr)
+            self.assertFalse(settings_file.exists())
+            self.assertIn("removed", stdout)
+
+    def test_migrate_v1_to_v2(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            config_dir = home / ".config" / "claude-env"
+            config_dir.mkdir(parents=True)
+            # Write v1 providers.json with url/token
+            (config_dir / "providers.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "providers": {
+                        "glm": {
+                            "base_url": "https://provider.example/v1",
+                            "token": "secret-token",
+                            "default_model": "glm-5-turbo",
+                            "wrapper_path": "/tmp/claude-glm",
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+
+            rc = migrate_storage_v1_to_v2(config_dir)
+
+            self.assertEqual(rc, 0)
+            # providers.json should be v2 without url/token
+            data = json.loads((config_dir / "providers.json").read_text())
+            self.assertEqual(data["version"], 2)
+            self.assertNotIn("base_url", data["providers"]["glm"])
+            self.assertNotIn("token", data["providers"]["glm"])
+            self.assertEqual(data["providers"]["glm"]["default_model"], "glm-5-turbo")
+            # env/settings file should exist with creds
+            settings_file = config_dir / "env" / "settings.glm.json"
+            self.assertTrue(settings_file.exists())
+            settings = json.loads(settings_file.read_text())
+            self.assertEqual(settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example/v1")
+            self.assertEqual(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "secret-token")
+
+    def test_migrate_v2_is_noop(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            config_dir = home / ".config" / "claude-env"
+            config_dir.mkdir(parents=True)
+            (config_dir / "providers.json").write_text(
+                json.dumps({
+                    "version": 2,
+                    "providers": {
+                        "glm": {
+                            "default_model": "glm-5-turbo",
+                            "wrapper_path": "/tmp/claude-glm",
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+
+            rc = migrate_storage_v1_to_v2(config_dir)
+
+            self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

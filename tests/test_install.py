@@ -36,10 +36,13 @@ class InstallTests(unittest.TestCase):
             target = home / ".local" / "bin" / "claude-env"
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(target.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
-            self.assertTrue(stat.S_IMODE(target.stat().st_mode) & stat.S_IXUSR)
+            # On Windows, chmod doesn't set Unix permission bits (ACLs used instead)
+            if os.name == "posix":
+                self.assertTrue(stat.S_IMODE(target.stat().st_mode) & stat.S_IXUSR)
             self.assertIn("installed", result.stdout)
             self.assertIn("not in PATH", result.stdout)
 
+    @unittest.skipIf(os.name == "nt", "bash-based installer not supported on Windows")
     def test_installer_from_source_dir_installs_runnable_cli(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)

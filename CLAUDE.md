@@ -4,12 +4,14 @@
 
 `claude-env` is a small command-line utility for managing provider-specific Claude Code execution profiles.
 
-The tool stores provider configuration and runs `claude` with provider-specific environment variables and, optionally, a default model. It can also create shortcut commands such as `claude-glm` or `claude-qwen`, but those shortcuts must not contain provider credentials.
+The tool stores provider configuration and runs `claude` with provider-specific credentials via `claude --settings`, and, optionally, a default model. It can also create shortcut commands such as `claude-glm` or `claude-qwen`, but those shortcuts must not contain provider credentials.
 
-The wrapper scripts set:
+The run command passes provider auth via the `--settings` flag, setting:
 
-- `ANTHROPIC_BASE_URL`
-- `ANTHROPIC_AUTH_TOKEN`
+- `env.ANTHROPIC_BASE_URL`
+- `env.ANTHROPIC_AUTH_TOKEN`
+
+This avoids shell environment variables and overrides any conflicting values in `~/.claude/settings.json`.
 
 The canonical execution path is:
 
@@ -101,7 +103,7 @@ If the wrapper already exists, the CLI should prompt before overwriting it. The 
 claude-env run <name> [claude arguments...]
 ```
 
-The command reads provider configuration, sets `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` in the child process environment, injects the configured default model only when the user did not pass `--model`, and executes `claude`.
+The command reads provider configuration, passes `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` via `claude --settings`, injects the configured default model only when the user did not pass `--model`, and executes `claude`. The `--settings` approach overrides any conflicting env keys in `~/.claude/settings.json`.
 
 Shortcut commands such as `claude-glm` are equivalent to:
 
@@ -162,11 +164,9 @@ The metadata file should record which shortcuts are managed by `claude-env`. Thi
 
 `claude-env run` should:
 
-1. Export `ANTHROPIC_BASE_URL`.
-2. Export `ANTHROPIC_AUTH_TOKEN`.
-3. Execute `claude`.
-4. Include the configured default model only when the user did not pass `--model`.
-5. Forward all user arguments unchanged.
+1. Build a `--settings` JSON containing `env.ANTHROPIC_BASE_URL` and `env.ANTHROPIC_AUTH_TOKEN`.
+2. Execute `claude --settings '<json>'` with the configured default model (if set and not overridden by `--model`).
+3. Forward all user arguments unchanged.
 
 Generated shortcuts should contain no base URL or token. On POSIX, prefer a symlink to `claude-env` when possible and fall back to a tiny launcher. On Windows, use a `.cmd` launcher.
 
@@ -184,8 +184,9 @@ Use test-driven development. Tests should be written before implementation chang
 Recommended test coverage:
 
 - `add` creates the expected token-free shortcut and metadata.
-- `run` sets provider environment variables from metadata.
+- `run` passes provider credentials via `--settings` to a mock provider.
 - `run` works against a mock Anthropic-compatible provider.
+- `run` overrides conflicting env keys in `~/.claude/settings.json`.
 - `add` prompts before overwriting an existing shortcut.
 - `add -y` overwrites a managed shortcut without prompting.
 - Missing `--url` and `--token` trigger interactive prompts.
