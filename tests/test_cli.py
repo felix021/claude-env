@@ -196,6 +196,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(shortcut.exists())
             content = shortcut.read_text(encoding="utf-8")
             self.assertIn("claude-env.cmd\" run glm %*", content)
+            self.assertIn("%errorlevel%", content)
+            self.assertNotIn("%%errorlevel%%", content)
+            self.assertIn("%~dp0", content)
+            self.assertNotIn("%%~dp0", content)
             self.assertNotIn("super-secret-token", content)
 
     def test_version_prints_version(self):

@@ -228,12 +228,12 @@ def create_shortcut(path: Path, name: str) -> None:
 
     if is_windows():
         path.write_text(
-            f"@echo off\r\n"
+            "@echo off\r\n"
             f"where claude-env.cmd >nul 2>&1\r\n"
-            f"if %%errorlevel%% equ 0 (\r\n"
+            f"if %errorlevel% equ 0 (\r\n"
             f"  claude-env.cmd run {name} %*\r\n"
-            f") else if exist \"%%~dp0claude-env.cmd\" (\r\n"
-            f"  \"%%~dp0claude-env.cmd\" run {name} %*\r\n"
+            f") else if exist \"%~dp0claude-env.cmd\" (\r\n"
+            f"  \"%~dp0claude-env.cmd\" run {name} %*\r\n"
             f") else (\r\n"
             f"  python -m claude_env run {name} %*\r\n"
             f")\r\n",
