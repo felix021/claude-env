@@ -10,29 +10,51 @@ $SourceUrl = if ($env:CLAUDE_ENV_URL) {
     "https://github.com/felix021/claude-env/archive/refs/heads/main.zip"
 }
 
-function Get-PythonCommand {
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) {
-        & py -3 --version *> $null
-        if ($LASTEXITCODE -eq 0) {
-            return "py -3"
+function Test-PythonExe {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    & $Path --version *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Find-PythonFromPath {
+    foreach ($Entry in ($env:Path -split ";")) {
+        if (-not $Entry) { continue }
+        $Candidate = Join-Path $Entry "python.exe"
+        if (Test-PythonExe $Candidate) {
+            return $Candidate
         }
     }
-
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) {
-        & python --version *> $null
-        if ($LASTEXITCODE -eq 0) {
-            return "python"
-        }
-    }
-
     return $null
 }
 
-$PythonCommand = Get-PythonCommand
+$PythonCommand = $null
+
+$py = Get-Command py -ErrorAction SilentlyContinue
+if ($py) {
+    & py -3 --version *> $null
+    if ($LASTEXITCODE -eq 0) {
+        $PythonCommand = "py -3"
+    }
+}
+
 if (-not $PythonCommand) {
-    Write-Error "Python 3 is required. Install it with: winget install Python.Python.3.12"
+    $Found = Find-PythonFromPath
+    if ($Found) {
+        $PythonCommand = $Found
+    }
+}
+
+while (-not $PythonCommand) {
+    Write-Host "No working Python found in PATH."
+    Write-Host "Install Python 3 first: winget install Python.Python.3.12"
+    Write-Host ""
+    $UserPath = Read-Host "Or enter the full path to python.exe (e.g. C:\Python310\python.exe)"
+    if ($UserPath -and (Test-PythonExe $UserPath)) {
+        $PythonCommand = $UserPath
+    } else {
+        Write-Host "That path does not work. Try again or press Ctrl+C to exit." -ForegroundColor Red
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
