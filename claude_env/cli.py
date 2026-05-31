@@ -39,8 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--url")
     add.add_argument("--token")
     add.add_argument("--model")
+    add.add_argument("--yolo", action="store_true", help="also create a yolo shortcut (--dangerously-skip-permissions)")
     add.add_argument("-y", "--yes", action="store_true")
     add.set_defaults(handler=handle_add)
+
+    add_yolo = subparsers.add_parser("add-yolo", help="create a yolo shortcut for an existing provider")
+    add_yolo.add_argument("name")
+    add_yolo.set_defaults(handler=handle_add_yolo)
 
     run = subparsers.add_parser("run", help="run claude with a managed provider")
     run.add_argument("name")
@@ -102,6 +107,22 @@ def handle_add(args: argparse.Namespace) -> int:
 
     action = "updated" if existing else "created"
     print(f"{action} {wrapper_path}")
+
+    if getattr(args, "yolo", False):
+        _create_yolo_shortcut(paths["bin_dir"], name)
+
+    return 0
+
+
+def handle_add_yolo(args: argparse.Namespace) -> int:
+    name = validate_provider_name(args.name)
+    paths = get_paths()
+    store = Store(config_dir=paths["config_dir"])
+    provider = store.get_provider(name)
+    if provider is None:
+        print(f"provider {name!r} is not configured", file=sys.stderr)
+        return 1
+    _create_yolo_shortcut(paths["bin_dir"], name)
     return 0
 
 
@@ -122,6 +143,10 @@ def handle_run(args: argparse.Namespace) -> int:
     claude_args = list(args.claude_args)
     if provider.default_model and not has_model_arg(claude_args):
         claude_args = ["--model", provider.default_model, *claude_args]
+
+    if has_yolo_arg(claude_args):
+        claude_args = [a for a in claude_args if a != "--yolo"]
+        claude_args.append("--dangerously-skip-permissions")
 
     command = [resolve_claude(), "--settings", str(settings_path), *claude_args]
     if is_windows() or os.environ.get("CLAUDE_ENV_EXEC_MODE") == "subprocess":
@@ -196,6 +221,10 @@ def confirm(prompt: str) -> bool:
 
 def has_model_arg(args: list[str]) -> bool:
     return any(arg == "--model" or arg.startswith("--model=") for arg in args)
+
+
+def has_yolo_arg(args: list[str]) -> bool:
+    return "--yolo" in args
 
 
 def shortcut_argv(sys_argv: list[str]) -> list[str]:
@@ -274,6 +303,40 @@ def get_paths() -> dict[str, Path]:
 def shortcut_path(bin_dir: Path, name: str) -> Path:
     suffix = ".cmd" if is_windows() else ""
     return bin_dir / f"claude-{name}{suffix}"
+
+
+def _create_yolo_shortcut(bin_dir: Path, name: str) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    yolo_path = shortcut_path(bin_dir, f"{name}-yolo")
+    if is_windows():
+        yolo_path.write_text(
+            "@echo off\r\n"
+            f"where claude-env.cmd >nul 2>&1\r\n"
+            f"if %errorlevel% equ 0 (\r\n"
+            f"  claude-env.cmd run {name} --yolo %*\r\n"
+            f") else if exist \"%~dp0claude-env.cmd\" (\r\n"
+            f"  \"%~dp0claude-env.cmd\" run {name} --yolo %*\r\n"
+            f") else (\r\n"
+            f"  python -m claude_env run {name} --yolo %*\r\n"
+            f")\r\n",
+            encoding="utf-8",
+        )
+    else:
+        yolo_path.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "script_dir=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+            "if [[ -x \"${script_dir}/claude-env\" ]]; then\n"
+            f"  exec \"${{script_dir}}/claude-env\" run {name} --yolo \"$@\"\n"
+            "elif command -v claude-env >/dev/null 2>&1; then\n"
+            f"  exec claude-env run {name} --yolo \"$@\"\n"
+            "else\n"
+            f"  exec python3 -m claude_env run {name} --yolo \"$@\"\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        os.chmod(yolo_path, 0o755)
+    print(f"created {yolo_path}")
 
 
 def is_windows() -> bool:

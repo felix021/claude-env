@@ -9,12 +9,16 @@ from tempfile import TemporaryDirectory
 from tests.mock_provider import MockAnthropicProvider
 
 
-def write_fake_claude(bin_dir: Path) -> None:
+def write_fake_claude(bin_dir: Path) -> Path:
+    args_file = bin_dir / "claude_args.txt"
     fake = bin_dir / "claude"
     fake.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys, urllib.request\n"
         "args = sys.argv[1:]\n"
+        "args_file = r'" + str(args_file).replace("\\", "\\\\") + "'\n"
+        "with open(args_file, 'w') as f:\n"
+        "    f.write(' '.join(args))\n"
         "model = None\n"
         "prompt = ''\n"
         "settings_env = {}\n"
@@ -257,6 +261,55 @@ class RunTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "OK")
             self.assertEqual(provider.requests[0]["headers"]["X-Api-Key"], "test-token")
+
+    def test_run_yolo_adds_dangerously_skip_permissions(self):
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            bin_dir = home / "fake-bin"
+            bin_dir.mkdir()
+            write_fake_claude(bin_dir)
+            self.run_cli(
+                home,
+                [
+                    "add", "glm",
+                    "--url", provider.url,
+                    "--token", "test-token",
+                    "--model", "glm-5-turbo",
+                    "-y",
+                ],
+                path_prefix=bin_dir,
+            )
+
+            result = self.run_cli(home, ["run", "glm", "--yolo", "-p", "hello"], path_prefix=bin_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "OK")
+            raw_args = (bin_dir / "claude_args.txt").read_text()
+            self.assertIn("--dangerously-skip-permissions", raw_args)
+
+    def test_run_without_yolo_does_not_add_dangerously_skip_permissions(self):
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            bin_dir = home / "fake-bin"
+            bin_dir.mkdir()
+            write_fake_claude(bin_dir)
+            self.run_cli(
+                home,
+                [
+                    "add", "glm",
+                    "--url", provider.url,
+                    "--token", "test-token",
+                    "--model", "glm-5-turbo",
+                    "-y",
+                ],
+                path_prefix=bin_dir,
+            )
+
+            result = self.run_cli(home, ["run", "glm", "-p", "hello"], path_prefix=bin_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw_args = (bin_dir / "claude_args.txt").read_text()
+            self.assertNotIn("--dangerously-skip-permissions", raw_args)
 
     def test_run_allows_unrelated_claude_settings_env_keys(self):
         with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:

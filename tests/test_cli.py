@@ -261,6 +261,111 @@ class CliTests(unittest.TestCase):
             self.assertFalse(settings_file.exists())
             self.assertIn("removed", stdout)
 
+    def test_add_yolo_creates_yolo_shortcut(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                [
+                    "add", "glm",
+                    "--url", "https://provider.example/v1",
+                    "--token", "super-secret-token",
+                    "--model", "glm-5-turbo",
+                    "--yolo", "-y",
+                ],
+                home=home,
+            )
+
+            self.assertEqual(code, 0, stderr)
+            suffix = ".cmd" if os.name == "nt" else ""
+            main_wrapper = home / ".local" / "bin" / f"claude-glm{suffix}"
+            yolo_wrapper = home / ".local" / "bin" / f"claude-glm-yolo{suffix}"
+            self.assertTrue(main_wrapper.exists())
+            self.assertTrue(yolo_wrapper.exists())
+            self.assertIn("created", stdout)
+
+    def test_add_yolo_shortcut_contains_no_credentials(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                [
+                    "add", "glm",
+                    "--url", "https://provider.example/v1",
+                    "--token", "super-secret-token",
+                    "--yolo", "-y",
+                ],
+                home=home,
+                input_text="\n",
+            )
+
+            self.assertEqual(code, 0, stderr)
+            suffix = ".cmd" if os.name == "nt" else ""
+            yolo_wrapper = home / ".local" / "bin" / f"claude-glm-yolo{suffix}"
+            content = "" if yolo_wrapper.is_symlink() else yolo_wrapper.read_text(encoding="utf-8")
+            self.assertNotIn("https://provider.example/v1", content)
+            self.assertNotIn("super-secret-token", content)
+
+    def test_add_without_yolo_does_not_create_yolo_shortcut(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                [
+                    "add", "glm",
+                    "--url", "https://provider.example/v1",
+                    "--token", "token", "-y",
+                ],
+                home=home,
+                input_text="\n",
+            )
+
+            self.assertEqual(code, 0, stderr)
+            suffix = ".cmd" if os.name == "nt" else ""
+            yolo_wrapper = home / ".local" / "bin" / f"claude-glm-yolo{suffix}"
+            self.assertFalse(yolo_wrapper.exists())
+
+    def test_add_yolo_creates_yolo_shortcut_for_existing_provider(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            # First add a provider without yolo
+            self.run_cli(
+                [
+                    "add", "glm",
+                    "--url", "https://provider.example/v1",
+                    "--token", "token", "-y",
+                ],
+                home=home,
+                input_text="\n",
+            )
+
+            suffix = ".cmd" if os.name == "nt" else ""
+            yolo_wrapper = home / ".local" / "bin" / f"claude-glm-yolo{suffix}"
+            self.assertFalse(yolo_wrapper.exists())
+
+            # Now add yolo shortcut for existing provider
+            code, stdout, stderr = self.run_cli(
+                ["add-yolo", "glm"],
+                home=home,
+            )
+
+            self.assertEqual(code, 0, stderr)
+            self.assertTrue(yolo_wrapper.exists())
+            self.assertIn("created", stdout)
+
+    def test_add_yolo_fails_for_nonexistent_provider(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                ["add-yolo", "nonexistent"],
+                home=home,
+            )
+
+            self.assertEqual(code, 1, stderr)
+            self.assertIn("not configured", stderr)
+
     def test_migrate_v1_to_v2(self):
         with TemporaryDirectory() as temp:
             home = Path(temp)
