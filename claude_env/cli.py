@@ -126,7 +126,7 @@ def handle_run(args: argparse.Namespace) -> int:
     command = [resolve_claude(), "--settings", str(settings_path), *claude_args]
     if is_windows() or os.environ.get("CLAUDE_ENV_EXEC_MODE") == "subprocess":
         return subprocess.call(command)
-    os.execvp("claude", command)
+    os.execvp(command[0], command)
     return 127
 
 
@@ -291,6 +291,13 @@ def resolve_claude() -> str:
         found = shutil.which("claude.cmd")
         if found:
             return found
+    # Fall back to the claude installed next to this wrapper, so the wrapper
+    # still works when ~/.local/bin is not on PATH (cron, ssh, subshells).
+    exe = os.environ.get("CLAUDE_ENV_EXECUTABLE")
+    if exe:
+        candidate = Path(exe).resolve().parent / "claude"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
     return "claude"
 
 

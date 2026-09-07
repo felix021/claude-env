@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -288,6 +289,64 @@ class RunTests(unittest.TestCase):
             self.assertEqual(add.returncode, 0, add.stderr)
 
             result = self.run_cli(home, ["run", "glm", "-p", "hello"], path_prefix=bin_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "OK")
+
+    def test_run_resolves_claude_next_to_wrapper_when_not_on_path(self):
+        if os.name == "nt":
+            self.skipTest("execvp path only applies to POSIX")
+        if shutil.which("claude"):
+            self.skipTest("a real claude is already on PATH")
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            fake_bin = home / "fake-bin"
+            fake_bin.mkdir()
+            write_fake_claude(fake_bin)
+            wrapper = fake_bin / "claude-env"
+            wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+            empty_path = home / "empty-path"
+            empty_path.mkdir()
+            add = self.run_cli(
+                home,
+                [
+                    "add",
+                    "glm",
+                    "--url",
+                    provider.url,
+                    "--token",
+                    "test-token",
+                    "--model",
+                    "glm-5-turbo",
+                    "-y",
+                ],
+                path_prefix=fake_bin,
+            )
+            self.assertEqual(add.returncode, 0, add.stderr)
+
+            path_sep = ";" if os.name == "nt" else ":"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "CLAUDE_ENV_HOME": str(home),
+                    "CLAUDE_ENV_BIN_DIR": str(home / ".local" / "bin"),
+                    "CLAUDE_ENV_CONFIG_DIR": str(home / ".config" / "claude-env"),
+                    "PATH": f"{empty_path}{path_sep}{env['PATH']}",
+                    "CLAUDE_ENV_EXECUTABLE": str(wrapper),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "NO_PROXY": "127.0.0.1,localhost",
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-m", "claude_env", "run", "glm", "-p", "hello"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "OK")
