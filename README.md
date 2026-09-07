@@ -96,6 +96,8 @@ claude-env run glm -p "Reply with exactly: OK"
 
 该命令会通过 `claude --settings` 注入 Provider 的凭据，覆盖 `~/.claude/settings.json` 中可能存在的冲突值。
 
+如果找不到 `claude` 命令（未安装或软链失效），`run` 会直接报错并给出安装提示，而不是抛出 Python traceback。
+
 也可以使用快捷命令:
 
 ```bash

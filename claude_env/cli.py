@@ -148,7 +148,16 @@ def handle_run(args: argparse.Namespace) -> int:
         claude_args = [a for a in claude_args if a != "--yolo"]
         claude_args.append("--dangerously-skip-permissions")
 
-    command = [resolve_claude(), "--settings", str(settings_path), *claude_args]
+    claude_path = resolve_claude()
+    if claude_path is None:
+        print(
+            "error: claude executable not found\n"
+            "Install Claude Code first, e.g.: curl -fsSL https://claude.ai/install.sh | bash",
+            file=sys.stderr,
+        )
+        return 127
+
+    command = [claude_path, "--settings", str(settings_path), *claude_args]
     if is_windows() or os.environ.get("CLAUDE_ENV_EXEC_MODE") == "subprocess":
         return subprocess.call(command)
     os.execvp(command[0], command)
@@ -346,7 +355,7 @@ def is_windows() -> bool:
     return os.name == "nt"
 
 
-def resolve_claude() -> str:
+def resolve_claude() -> str | None:
     found = shutil.which("claude")
     if found:
         return found
@@ -361,7 +370,7 @@ def resolve_claude() -> str:
         candidate = Path(exe).resolve().parent / "claude"
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
-    return "claude"
+    return None
 
 
 def settings_env_path(config_dir: Path, name: str) -> Path:

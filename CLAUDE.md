@@ -186,6 +186,7 @@ Recommended test coverage:
 - `add` creates the expected token-free shortcut and metadata.
 - `run` passes provider credentials via `--settings` to a mock provider.
 - `run` works against a mock Anthropic-compatible provider.
+- `run` prints a clear error when the `claude` executable is missing.
 - `run` overrides conflicting env keys in `~/.claude/settings.json`.
 - `add` prompts before overwriting an existing shortcut.
 - `add -y` overwrites a managed shortcut without prompting.

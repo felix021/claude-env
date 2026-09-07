@@ -404,6 +404,55 @@ class RunTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "OK")
 
+    def test_run_prints_clear_error_when_claude_is_missing(self):
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            empty_path = home / "empty-path"
+            empty_path.mkdir()
+            add = self.run_cli(
+                home,
+                [
+                    "add",
+                    "glm",
+                    "--url",
+                    provider.url,
+                    "--token",
+                    "test-token",
+                    "--model",
+                    "glm-5-turbo",
+                    "-y",
+                ],
+                path_prefix=empty_path,
+            )
+            self.assertEqual(add.returncode, 0, add.stderr)
+
+            env = os.environ.copy()
+            env.pop("CLAUDE_ENV_EXECUTABLE", None)
+            env.update(
+                {
+                    "CLAUDE_ENV_HOME": str(home),
+                    "CLAUDE_ENV_BIN_DIR": str(home / ".local" / "bin"),
+                    "CLAUDE_ENV_CONFIG_DIR": str(home / ".config" / "claude-env"),
+                    # keep PATH fully hermetic so claude is not found anywhere
+                    "PATH": str(empty_path),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                }
+            )
+            result = subprocess.run(
+                [sys.executable, "-m", "claude_env", "run", "glm", "-p", "hello"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+            )
+
+            self.assertEqual(result.returncode, 127, result.stderr)
+            self.assertIn("not found", result.stderr)
+            self.assertIn("claude", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

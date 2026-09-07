@@ -96,6 +96,8 @@ claude-env run glm -p "Reply with exactly: OK"
 
 The command passes provider credentials via `claude --settings`, which overrides any conflicting values in `~/.claude/settings.json`.
 
+If the `claude` executable is missing (not installed or a broken symlink), `run` prints a clear error with install instructions instead of a Python traceback.
+
 Use the shortcut:
 
 ```bash
