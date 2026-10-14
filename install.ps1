@@ -93,9 +93,9 @@ Set-Content -Path $Target -Value $Launcher -Encoding ASCII
 
 Write-Output "installed $Target"
 
-# Run one-time storage migration (v1 -> v2: move url/token from providers.json to env/)
+# Run one-time storage migrations (v1 -> v2: url/token; v2 -> v3: default model)
 $Env:CLAUDE_ENV_HOME = $HomeDir
-$migrateScript = "import sys; sys.path.insert(0, '$AppDir'); from claude_env.cli import migrate_storage_v1_to_v2; migrate_storage_v1_to_v2()"
+$migrateScript = "import sys; sys.path.insert(0, '$AppDir'); from claude_env.cli import migrate_storage; migrate_storage()"
 $Py = Get-Command py -ErrorAction SilentlyContinue
 if ($Py) {
     & py -3 -c $migrateScript 2>$null

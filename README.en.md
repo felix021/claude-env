@@ -10,6 +10,7 @@ Shortcuts do not contain URLs or tokens. Sensitive values live in the local conf
 
 - Manage multiple Claude Code provider profiles.
 - Configure an optional default model per provider.
+- Set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (the auto-compact window) for providers with a small context window.
 - Run Claude Code through `claude-env run <name> ...`.
 - Create token-free shortcuts such as `claude-glm` and `claude-qwen`.
 - Let runtime `--model` override the configured default model.
@@ -80,7 +81,16 @@ claude-env add glm \
   --model "glm-5-turbo"
 ```
 
-If `--url` or `--token` is omitted, the command prompts interactively. Token input is hidden. If `--model` is omitted, the command also asks for an optional default model; press Enter to leave it unset and use the provider's own default model selection at runtime.
+If `--url` or `--token` is omitted, the command prompts interactively. Token input is hidden. If `--model` is omitted, the command also asks for an optional default model; press Enter to leave it unset and use the provider's own default model selection at runtime. The default model is stored in the `model` field of `env/settings.<name>.json`.
+
+If the provider's real context window is smaller than what Claude Code assumes (for example a small-context model served locally through llama.cpp), add `--auto-compact-window` to set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` so auto-compact triggers early enough to stay under the provider's context limit:
+
+```bash
+claude-env add glm \
+  --url "https://provider.example/api/anthropic" \
+  --token "your-token" \
+  --auto-compact-window 118784
+```
 
 List profiles:
 
@@ -133,6 +143,7 @@ Linux/macOS:
 ~/.local/bin/claude-<name>
 ~/.local/share/claude-env/
 ~/.config/claude-env/providers.json
+~/.config/claude-env/env/settings.<name>.json
 ```
 
 Windows:
@@ -142,9 +153,10 @@ Windows:
 %USERPROFILE%\.local\bin\claude-<name>.cmd
 %USERPROFILE%\.local\share\claude-env\
 %APPDATA%\claude-env\providers.json
+%APPDATA%\claude-env\env\settings.<name>.json
 ```
 
-`providers.json` contains tokens. `claude-env` tries to keep it readable and writable only by the current user where practical. Shortcut commands do not contain URLs or tokens.
+`env/settings.<name>.json` stores the URL, token, default model, and the optional `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; `claude-env` tries to keep it readable and writable only by the current user where practical. `providers.json` only keeps metadata such as shortcut paths. Shortcut commands do not contain URLs or tokens. Configs from older versions are migrated automatically on install/upgrade.
 
 ## Test
 

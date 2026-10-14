@@ -56,7 +56,7 @@ fi
 
 echo "installed ${target}"
 
-# Run one-time storage migration (v1 -> v2: move url/token from providers.json to env/)
+# Run one-time storage migrations (v1 -> v2: url/token; v2 -> v3: default model)
 if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
   export CLAUDE_ENV_HOME="${HOME}"
   _pycmd="python3"
@@ -64,8 +64,8 @@ if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
   "$_pycmd" -c "
 import sys
 sys.path.insert(0, '${app_dir}')
-from claude_env.cli import migrate_storage_v1_to_v2
-migrate_storage_v1_to_v2()
+from claude_env.cli import migrate_storage
+migrate_storage()
 " 2>/dev/null || true
 fi
 

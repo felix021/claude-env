@@ -12,12 +12,14 @@ from tests.mock_provider import MockAnthropicProvider
 
 def write_fake_claude(bin_dir: Path) -> Path:
     args_file = bin_dir / "claude_args.txt"
+    env_file = bin_dir / "claude_env.txt"
     fake = bin_dir / "claude"
     fake.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys, urllib.request\n"
         "args = sys.argv[1:]\n"
         "args_file = r'" + str(args_file).replace("\\", "\\\\") + "'\n"
+        "env_file = r'" + str(env_file).replace("\\", "\\\\") + "'\n"
         "with open(args_file, 'w') as f:\n"
         "    f.write(' '.join(args))\n"
         "model = None\n"
@@ -48,6 +50,8 @@ def write_fake_claude(bin_dir: Path) -> Path:
         "        i += 1\n"
         "base_url = settings_env.get('ANTHROPIC_BASE_URL', '')\n"
         "token = settings_env.get('ANTHROPIC_AUTH_TOKEN', '')\n"
+        "with open(env_file, 'w') as f:\n"
+        "    f.write(json.dumps(settings_env))\n"
         "body = json.dumps({'model': model, 'messages': [{'role': 'user', 'content': prompt}]}).encode()\n"
         "req = urllib.request.Request(\n"
         "    base_url,\n"
@@ -128,6 +132,65 @@ class RunTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), "OK")
             self.assertEqual(provider.requests[0]["headers"]["X-Api-Key"], "test-token")
             self.assertEqual(provider.requests[0]["body"]["model"], "glm-5-turbo")
+
+    def test_run_falls_back_to_providers_json_default_model(self):
+        # Simulate a not-yet-migrated v2 config: model only in providers.json
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            bin_dir = home / "fake-bin"
+            bin_dir.mkdir()
+            write_fake_claude(bin_dir)
+            self.run_cli(
+                home,
+                [
+                    "add", "glm",
+                    "--url", provider.url,
+                    "--token", "test-token",
+                    "--model", "glm-5-turbo",
+                    "-y",
+                ],
+                path_prefix=bin_dir,
+            )
+            config_dir = home / ".config" / "claude-env"
+            settings_file = config_dir / "env" / "settings.glm.json"
+            settings = json.loads(settings_file.read_text())
+            settings.pop("model", None)  # simulate pre-v3 settings file
+            settings_file.write_text(json.dumps(settings))
+            data = json.loads((config_dir / "providers.json").read_text())
+            data["providers"]["glm"]["default_model"] = "legacy-model"
+            (config_dir / "providers.json").write_text(json.dumps(data))
+
+            result = self.run_cli(home, ["run", "glm", "-p", "hello"], path_prefix=bin_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(provider.requests[0]["body"]["model"], "legacy-model")
+
+    def test_run_passes_auto_compact_window_via_settings_env(self):
+        with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:
+            home = Path(temp)
+            bin_dir = home / "fake-bin"
+            bin_dir.mkdir()
+            write_fake_claude(bin_dir)
+            self.run_cli(
+                home,
+                [
+                    "add", "glm",
+                    "--url", provider.url,
+                    "--token", "test-token",
+                    "--model", "glm-5-turbo",
+                    "--auto-compact-window", "118784",
+                    "-y",
+                ],
+                path_prefix=bin_dir,
+            )
+
+            result = self.run_cli(home, ["run", "glm", "-p", "hello"], path_prefix=bin_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings_env = json.loads((bin_dir / "claude_env.txt").read_text())
+            self.assertEqual(
+                settings_env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "118784"
+            )
 
     def test_run_runtime_model_overrides_default_model(self):
         with TemporaryDirectory() as temp, MockAnthropicProvider() as provider:

@@ -10,6 +10,7 @@
 
 - 管理多个 Claude Code Provider 配置。
 - 为每个 Provider 设置可选默认模型。
+- 为小上下文 Provider 设置 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（自动压缩窗口）。
 - 通过 `claude-env run <name> ...` 运行 Claude Code。
 - 创建无密钥快捷命令，例如 `claude-glm`、`claude-qwen`。
 - 运行时传入的 `--model` 会覆盖默认模型。
@@ -80,7 +81,16 @@ claude-env add glm \
   --model "glm-5-turbo"
 ```
 
-如果省略 `--url` 或 `--token`，命令会交互式询问；Token 输入不会回显。如果省略 `--model`，命令也会询问默认模型；直接回车表示不设置默认模型，运行时使用 Provider 自己的默认模型选择。
+如果省略 `--url` 或 `--token`，命令会交互式询问；Token 输入不会回显。如果省略 `--model`，命令也会询问默认模型；直接回车表示不设置默认模型，运行时使用 Provider 自己的默认模型选择。默认模型保存在 `env/settings.<name>.json` 的 `model` 字段中。
+
+如果 Provider 的实际上下文窗口比 Claude Code 假设的小（例如本地 llama.cpp 部署的小上下文模型），可以加 `--auto-compact-window` 设置 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`，让自动压缩（auto-compact）提前触发，避免超出 Provider 的上下文上限：
+
+```bash
+claude-env add glm \
+  --url "https://provider.example/api/anthropic" \
+  --token "your-token" \
+  --auto-compact-window 118784
+```
 
 查看配置:
 
@@ -133,6 +143,7 @@ Linux/macOS:
 ~/.local/bin/claude-<name>
 ~/.local/share/claude-env/
 ~/.config/claude-env/providers.json
+~/.config/claude-env/env/settings.<name>.json
 ```
 
 Windows:
@@ -142,9 +153,10 @@ Windows:
 %USERPROFILE%\.local\bin\claude-<name>.cmd
 %USERPROFILE%\.local\share\claude-env\
 %APPDATA%\claude-env\providers.json
+%APPDATA%\claude-env\env\settings.<name>.json
 ```
 
-`providers.json` 包含 Token，本工具会尽量使用仅当前用户可读写的权限保存它。快捷命令不包含 URL 或 Token。
+`env/settings.<name>.json` 保存 URL、Token、默认模型和可选的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`，本工具会尽量使用仅当前用户可读写的权限保存它；`providers.json` 只保存快捷命令路径等元数据。快捷命令不包含 URL 或 Token。旧版本配置会在安装/升级时自动迁移到新格式。
 
 ## 测试
 

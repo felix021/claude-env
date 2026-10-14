@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--url")
     add.add_argument("--token")
     add.add_argument("--model")
+    add.add_argument(
+        "--auto-compact-window",
+        type=int,
+        metavar="TOKENS",
+        help="set env.CLAUDE_CODE_AUTO_COMPACT_WINDOW for providers with a small context window",
+    )
     add.add_argument("--yolo", action="store_true", help="also create a yolo shortcut (--dangerously-skip-permissions)")
     add.add_argument("-y", "--yes", action="store_true")
     add.set_defaults(handler=handle_add)
@@ -69,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def handle_add(args: argparse.Namespace) -> int:
     name = validate_provider_name(args.name)
+    if args.auto_compact_window is not None and args.auto_compact_window <= 0:
+        raise ValueError("--auto-compact-window must be a positive integer (tokens)")
     base_url = args.url or input("Provider base URL: ").strip()
     token = args.token or getpass.getpass("Provider token: ").strip()
     default_model = args.model
@@ -98,12 +106,19 @@ def handle_add(args: argparse.Namespace) -> int:
     store.save_provider(
         Provider(
             name=name,
-            default_model=default_model,
+            default_model=None,
             wrapper_path=str(wrapper_path),
         )
     )
 
-    _write_settings_file(paths["config_dir"], name, base_url, token)
+    _write_settings_file(
+        paths["config_dir"],
+        name,
+        base_url,
+        token,
+        model=default_model,
+        auto_compact_window=args.auto_compact_window,
+    )
 
     action = "updated" if existing else "created"
     print(f"{action} {wrapper_path}")
@@ -141,8 +156,9 @@ def handle_run(args: argparse.Namespace) -> int:
         return 1
 
     claude_args = list(args.claude_args)
-    if provider.default_model and not has_model_arg(claude_args):
-        claude_args = ["--model", provider.default_model, *claude_args]
+    default_model = _read_settings(settings_path).get("model") or provider.default_model
+    if default_model and not has_model_arg(claude_args):
+        claude_args = ["--model", default_model, *claude_args]
 
     if has_yolo_arg(claude_args):
         claude_args = [a for a in claude_args if a != "--yolo"]
@@ -201,18 +217,18 @@ def handle_list(args: argparse.Namespace) -> int:
     if not providers:
         print("No providers configured.")
         return 0
-    print("NAME\tBASE_URL\tDEFAULT_MODEL\tWRAPPER\tTOKEN")
+    print("NAME\tBASE_URL\tDEFAULT_MODEL\tAUTO_COMPACT_WINDOW\tWRAPPER\tTOKEN")
     for provider in providers:
-        model = provider.default_model or "-"
         settings_path = settings_env_path(paths["config_dir"], provider.name)
         if settings_path.exists():
-            with settings_path.open("r", encoding="utf-8") as f:
-                settings = json.load(f)
-            base_url = settings.get("env", {}).get("ANTHROPIC_BASE_URL", "-")
+            settings = _read_settings(settings_path)
         else:
-            base_url = "-"
+            settings = {}
+        base_url = settings.get("env", {}).get("ANTHROPIC_BASE_URL", "-")
+        window = settings.get("env", {}).get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "-")
+        model = settings.get("model") or provider.default_model or "-"
         print(
-            f"{provider.name}\t{base_url}\t{model}\t"
+            f"{provider.name}\t{base_url}\t{model}\t{window}\t"
             f"{provider.wrapper_path}\t***"
         )
     return 0
@@ -378,21 +394,43 @@ def settings_env_path(config_dir: Path, name: str) -> Path:
     return env_dir / f"settings.{name}.json"
 
 
-def _write_settings_file(config_dir: Path, name: str, base_url: str, token: str) -> None:
-    env_dir = config_dir / "env"
-    env_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = settings_env_path(config_dir, name)
-    settings_data = json.dumps({
-        "env": {
-            "ANTHROPIC_BASE_URL": base_url,
-            "ANTHROPIC_AUTH_TOKEN": token,
-        }
-    })
+def _read_settings(settings_path: Path) -> dict:
+    try:
+        with settings_path.open("r", encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def _write_settings_json(settings_path: Path, settings: dict) -> None:
     tmp_path = settings_path.with_suffix(".json.tmp")
-    tmp_path.write_text(settings_data, encoding="utf-8")
+    tmp_path.write_text(json.dumps(settings), encoding="utf-8")
     os.chmod(tmp_path, 0o600)
     tmp_path.replace(settings_path)
     os.chmod(settings_path, 0o600)
+
+
+def _write_settings_file(
+    config_dir: Path,
+    name: str,
+    base_url: str,
+    token: str,
+    model: str | None = None,
+    auto_compact_window: int | None = None,
+) -> None:
+    env_dir = config_dir / "env"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    env_settings = {
+        "ANTHROPIC_BASE_URL": base_url,
+        "ANTHROPIC_AUTH_TOKEN": token,
+    }
+    if auto_compact_window is not None:
+        env_settings["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(auto_compact_window)
+    settings = {"env": env_settings}
+    if model:
+        settings["model"] = model
+    _write_settings_json(settings_env_path(config_dir, name), settings)
 
 
 def migrate_storage_v1_to_v2(config_dir: Path | None = None) -> int:
@@ -435,3 +473,55 @@ def migrate_storage_v1_to_v2(config_dir: Path | None = None) -> int:
     os.chmod(store_path, 0o600)
     print(f"migrated {migrated} provider(s) to v2")
     return 0
+
+
+def migrate_storage_v2_to_v3(config_dir: Path | None = None) -> int:
+    """One-time migration from v2 (default_model in providers.json) to v3 (model in env/settings.*.json).
+    Returns 0 on success, 1 if no migration needed, 2 on error.
+    """
+    config_dir = config_dir or get_paths()["config_dir"]
+    store_path = config_dir / "providers.json"
+    if not store_path.exists():
+        return 1
+
+    with store_path.open("r", encoding="utf-8-sig") as f:
+        data = json.load(f)
+
+    if data.get("version", 1) >= 3:
+        return 1
+
+    providers = data.get("providers", {})
+    migrated = 0
+    for name, item in providers.items():
+        default_model = item.get("default_model")
+        if not default_model:
+            continue
+        settings_path = settings_env_path(config_dir, name)
+        if not settings_path.exists():
+            # No credentials file to hold the model; keep the providers.json fallback.
+            continue
+        settings = _read_settings(settings_path)
+        if not settings:
+            continue
+        settings.setdefault("model", default_model)
+        _write_settings_json(settings_path, settings)
+        item.pop("default_model", None)
+        item["version"] = 3
+        migrated += 1
+
+    data["version"] = 3
+    tmp_path = store_path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp_path, 0o600)
+    tmp_path.replace(store_path)
+    os.chmod(store_path, 0o600)
+    print(f"migrated {migrated} provider(s) to v3")
+    return 0
+
+
+def migrate_storage(config_dir: Path | None = None) -> None:
+    """Run all one-time storage migrations in order."""
+    migrate_storage_v1_to_v2(config_dir)
+    migrate_storage_v2_to_v3(config_dir)

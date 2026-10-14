@@ -9,7 +9,11 @@ from unittest import mock
 
 from claude_env.cli import main
 from claude_env import __version__
-from claude_env.cli import main, migrate_storage_v1_to_v2
+from claude_env.cli import (
+    main,
+    migrate_storage_v1_to_v2,
+    migrate_storage_v2_to_v3,
+)
 
 
 class CliTests(unittest.TestCase):
@@ -402,6 +406,159 @@ class CliTests(unittest.TestCase):
             settings = json.loads(settings_file.read_text())
             self.assertEqual(settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example/v1")
             self.assertEqual(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "secret-token")
+
+    def test_add_writes_model_to_settings_file(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                [
+                    "add", "glm",
+                    "--url", "https://provider.example/v1",
+                    "--token", "token",
+                    "--model", "glm-5-turbo",
+                    "-y",
+                ],
+                home=home,
+            )
+
+            self.assertEqual(code, 0, stderr)
+            settings = json.loads(
+                (home / ".config" / "claude-env" / "env" / "settings.glm.json").read_text()
+            )
+            self.assertEqual(settings["model"], "glm-5-turbo")
+            data = json.loads((home / ".config" / "claude-env" / "providers.json").read_text())
+            self.assertIsNone(data["providers"]["glm"].get("default_model"))
+
+    def test_add_auto_compact_window_to_settings_env(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                [
+                    "add", "glm",
+                    "--url", "https://provider.example/v1",
+                    "--token", "token",
+                    "--auto-compact-window", "118784",
+                    "-y",
+                ],
+                home=home,
+                input_text="\n",
+            )
+
+            self.assertEqual(code, 0, stderr)
+            settings = json.loads(
+                (home / ".config" / "claude-env" / "env" / "settings.glm.json").read_text()
+            )
+            self.assertEqual(
+                settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "118784"
+            )
+            code, stdout, stderr = self.run_cli(["list"], home=home)
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("118784", stdout)
+
+    def test_add_rejects_non_positive_auto_compact_window(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                [
+                    "add", "glm",
+                    "--url", "https://provider.example/v1",
+                    "--token", "token",
+                    "--auto-compact-window", "0",
+                    "-y",
+                ],
+                home=home,
+            )
+
+            self.assertEqual(code, 2)
+            self.assertIn("auto-compact-window", stderr)
+            self.assertFalse(
+                (home / ".config" / "claude-env" / "env" / "settings.glm.json").exists()
+            )
+
+    def test_migrate_v2_to_v3_moves_model_into_settings(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            config_dir = home / ".config" / "claude-env"
+            env_dir = config_dir / "env"
+            env_dir.mkdir(parents=True)
+            (config_dir / "providers.json").write_text(
+                json.dumps({
+                    "version": 2,
+                    "providers": {
+                        "glm": {
+                            "default_model": "glm-5-turbo",
+                            "wrapper_path": "/tmp/claude-glm",
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (env_dir / "settings.glm.json").write_text(
+                json.dumps({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://provider.example/v1",
+                        "ANTHROPIC_AUTH_TOKEN": "secret-token",
+                    }
+                }),
+                encoding="utf-8",
+            )
+
+            rc = migrate_storage_v2_to_v3(config_dir)
+
+            self.assertEqual(rc, 0)
+            data = json.loads((config_dir / "providers.json").read_text())
+            self.assertEqual(data["version"], 3)
+            self.assertNotIn("default_model", data["providers"]["glm"])
+            self.assertEqual(data["providers"]["glm"]["wrapper_path"], "/tmp/claude-glm")
+            settings = json.loads((env_dir / "settings.glm.json").read_text())
+            self.assertEqual(settings["model"], "glm-5-turbo")
+            self.assertEqual(settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example/v1")
+            self.assertEqual(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "secret-token")
+            if os.name == "posix":
+                mode = (env_dir / "settings.glm.json").stat().st_mode
+                self.assertEqual(mode & 0o777, 0o600)
+
+    def test_migrate_v3_is_noop(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            config_dir = home / ".config" / "claude-env"
+            config_dir.mkdir(parents=True)
+            (config_dir / "providers.json").write_text(
+                json.dumps({"version": 3, "providers": {}}),
+                encoding="utf-8",
+            )
+
+            rc = migrate_storage_v2_to_v3(config_dir)
+
+            self.assertEqual(rc, 1)
+
+    def test_migrate_v2_to_v3_keeps_default_model_when_settings_missing(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            config_dir = home / ".config" / "claude-env"
+            config_dir.mkdir(parents=True)
+            (config_dir / "providers.json").write_text(
+                json.dumps({
+                    "version": 2,
+                    "providers": {
+                        "glm": {
+                            "default_model": "glm-5-turbo",
+                            "wrapper_path": "/tmp/claude-glm",
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+
+            rc = migrate_storage_v2_to_v3(config_dir)
+
+            self.assertEqual(rc, 0)
+            data = json.loads((config_dir / "providers.json").read_text())
+            # fallback stays readable from providers.json when creds file is gone
+            self.assertEqual(data["providers"]["glm"].get("default_model"), "glm-5-turbo")
 
     def test_migrate_v2_is_noop(self):
         with TemporaryDirectory() as temp:

@@ -46,7 +46,7 @@ class Store:
             "default_model": provider.default_model,
             "wrapper_path": provider.wrapper_path,
             "managed_by": "claude-env",
-            "version": 2,
+            "version": 3,
         }
         self._write(data)
 
@@ -57,7 +57,7 @@ class Store:
 
     def _read(self) -> dict:
         if not self.path.exists():
-            return {"version": 1, "providers": {}}
+            return {"version": 3, "providers": {}}
         with self.path.open("r", encoding="utf-8-sig") as f:
             data = json.load(f)
         data.setdefault("version", 1)
