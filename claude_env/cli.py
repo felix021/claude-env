@@ -43,7 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-compact-window",
         type=int,
         metavar="TOKENS",
-        help="set env.CLAUDE_CODE_AUTO_COMPACT_WINDOW for providers with a small context window",
+        help=(
+            "set env.CLAUDE_CODE_AUTO_COMPACT_WINDOW to the provider's hard max context"
+            " size in tokens; no need to reserve room for the compact summary, Claude"
+            " Code keeps its own buffer and compacts before the limit"
+        ),
     )
     add.add_argument("--yolo", action="store_true", help="also create a yolo shortcut (--dangerously-skip-permissions)")
     add.add_argument("-y", "--yes", action="store_true")

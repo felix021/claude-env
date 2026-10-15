@@ -92,6 +92,8 @@ claude-env add glm \
   --auto-compact-window 118784
 ```
 
+Set this to the provider's hard max context size as-is; there is no need to reserve room for the compact summary: Claude Code keeps its own autocompact buffer (about 33k tokens in practice, a fixed amount independent of the window size) and compacts before the limit is reached. Note this setting takes precedence over the in-session `/autocompact` command; to change it, re-run `claude-env add`.
+
 List profiles:
 
 ```bash

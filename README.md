@@ -92,6 +92,8 @@ claude-env add glm \
   --auto-compact-window 118784
 ```
 
+这个值直接填 Provider 的最大上下文（max ctx）即可，不需要为压缩摘要的输出预留余量：Claude Code 内部会从该窗口预留 autocompact buffer（实测约 33k token，固定值、不随窗口大小变化），并在到达上限之前触发压缩。注意该设置的优先级高于会话内的 `/autocompact` 命令，要调整需重新运行 `claude-env add`。
+
 查看配置:
 
 ```bash
