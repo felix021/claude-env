@@ -4,9 +4,14 @@ import argparse
 import getpass
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from .store import Provider, Store
@@ -28,6 +33,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,6 +70,24 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("claude_args", nargs=argparse.REMAINDER)
     run.set_defaults(handler=handle_run)
 
+    update = subparsers.add_parser("update", help="update a provider's settings")
+    update.add_argument("name")
+    update.add_argument("--url", help="new provider base URL")
+    update.add_argument("--token", help="new provider token")
+    model_group = update.add_mutually_exclusive_group()
+    model_group.add_argument("--model", help="new default model")
+    model_group.add_argument("--no-model", action="store_true", help="clear the default model")
+    window_group = update.add_mutually_exclusive_group()
+    window_group.add_argument(
+        "--auto-compact-window", type=int, metavar="TOKENS", help="set the auto-compact window"
+    )
+    window_group.add_argument(
+        "--no-auto-compact-window",
+        action="store_true",
+        help="clear the auto-compact window",
+    )
+    update.set_defaults(handler=handle_update)
+
     for command in ("remove", "rm", "delete", "del"):
         remove = subparsers.add_parser(command, help="remove a provider wrapper")
         remove.add_argument("name")
@@ -73,6 +99,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     version_cmd = subparsers.add_parser("version", help="print claude-env version")
     version_cmd.set_defaults(handler=handle_version)
+
+    upgrade_cmd = subparsers.add_parser(
+        "upgrade", help="upgrade claude-env to the latest version"
+    )
+    upgrade_cmd.add_argument(
+        "--version",
+        metavar="VERSION",
+        help=(
+            "install a specific version (e.g. 0.5.0 or v0.5.0);"
+            " an explicit version may downgrade"
+        ),
+    )
+    upgrade_cmd.set_defaults(handler=handle_upgrade)
 
     return parser
 
@@ -160,7 +199,8 @@ def handle_run(args: argparse.Namespace) -> int:
         return 1
 
     claude_args = list(args.claude_args)
-    default_model = _read_settings(settings_path).get("model") or provider.default_model
+    settings = _read_settings(settings_path) or {}
+    default_model = settings.get("model") or provider.default_model
     if default_model and not has_model_arg(claude_args):
         claude_args = ["--model", default_model, *claude_args]
 
@@ -178,10 +218,197 @@ def handle_run(args: argparse.Namespace) -> int:
         return 127
 
     command = [claude_path, "--settings", str(settings_path), *claude_args]
+    child_env = os.environ.copy()
+    # Third-party profiles authenticate with ANTHROPIC_AUTH_TOKEN, which always
+    # takes precedence over the claude.ai login, so the connectors can never
+    # load. Tell Claude Code not to try (and not to warn about it) unless the
+    # user explicitly asked for the default behavior.
+    child_env.setdefault("ENABLE_CLAUDEAI_MCP_SERVERS", "0")
+
+    if is_headless(claude_args) and not os.environ.get("CLAUDE_ENV_NO_STDERR_FILTER"):
+        return run_with_filtered_stderr(command, child_env)
     if is_windows() or os.environ.get("CLAUDE_ENV_EXEC_MODE") == "subprocess":
-        return subprocess.call(command)
-    os.execvp(command[0], command)
+        return subprocess.call(command, env=child_env)
+    os.execvpe(command[0], command, child_env)
     return 127
+
+
+def handle_update(args: argparse.Namespace) -> int:
+    name = validate_provider_name(args.name)
+    paths = get_paths()
+    store = Store(config_dir=paths["config_dir"])
+    provider = store.get_provider(name)
+    if provider is None:
+        print(f"provider {name!r} is not configured", file=sys.stderr)
+        return 1
+
+    settings_path = settings_env_path(paths["config_dir"], name)
+    if not settings_path.exists():
+        print(f"error: credentials file {settings_path} not found", file=sys.stderr)
+        return 1
+
+    if args.auto_compact_window is not None and args.auto_compact_window <= 0:
+        raise ValueError("--auto-compact-window must be a positive integer (tokens)")
+    if args.url is not None and not args.url.strip():
+        raise ValueError("--url must not be empty")
+    if args.token is not None and not args.token.strip():
+        raise ValueError("--token must not be empty")
+    if args.model is not None and not args.model.strip():
+        raise ValueError("--model must not be empty; use --no-model to clear it")
+
+    requested = any(
+        (
+            args.url is not None,
+            args.token is not None,
+            args.model is not None,
+            args.no_model,
+            args.auto_compact_window is not None,
+            args.no_auto_compact_window,
+        )
+    )
+    if not requested:
+        print(
+            "error: nothing to update; pass --url, --token, --model, --no-model, "
+            "--auto-compact-window or --no-auto-compact-window",
+            file=sys.stderr,
+        )
+        return 2
+
+    settings = _read_settings(settings_path)
+    if settings is None:
+        print(f"error: could not read credentials file {settings_path}", file=sys.stderr)
+        return 1
+    env = settings.get("env", {})
+    if not isinstance(env, dict):
+        raise ValueError(f"invalid credentials file {settings_path}: env must be an object")
+
+    if args.url is not None:
+        env["ANTHROPIC_BASE_URL"] = args.url
+    if args.token is not None:
+        env["ANTHROPIC_AUTH_TOKEN"] = args.token
+    if args.auto_compact_window is not None:
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(args.auto_compact_window)
+    if args.no_auto_compact_window:
+        env.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+    if args.no_model:
+        settings.pop("model", None)
+    elif args.model is not None:
+        settings["model"] = args.model
+    settings["env"] = env
+
+    _write_settings_json(settings_path, settings)
+
+    # Also clear the legacy providers.json fallback; otherwise `run` can still
+    # inject an old default_model after an explicit --no-model.
+    if args.no_model and provider.default_model is not None:
+        store.save_provider(
+            Provider(
+                name=name,
+                default_model=None,
+                wrapper_path=provider.wrapper_path,
+            )
+        )
+
+    print(f"updated {name}")
+    return 0
+
+
+NOISE_MARKERS = (
+    b"[claude-code:unrecognized_model]",
+    b"code.claude.com/docs/en/auto-mode-classifier-billing",
+)
+
+
+def is_noise_line(line: bytes) -> bool:
+    return any(marker in line for marker in NOISE_MARKERS)
+
+
+def is_headless(args: list[str]) -> bool:
+    for arg in args:
+        if arg == "--":
+            break
+        if arg in ("-p", "--print"):
+            return True
+        if arg.startswith(("--print=", "--output-format", "--input-format")):
+            return True
+    return False
+
+
+def run_with_filtered_stderr(command: list[str], env: dict[str, str]) -> int:
+    # With exec the signal reaches claude directly. Now that we supervise it,
+    # forward termination signals ourselves so a wrapper killed by `timeout`,
+    # CI, or the job scheduler never leaves an orphan claude behind.
+    process: subprocess.Popen | None = None
+    pending_signals: list[int] = []
+    previous_handlers: dict[int, object] = {}
+
+    def forward(signum: int, frame: object) -> None:
+        if process is None:
+            pending_signals.append(signum)
+        elif process.poll() is None:
+            try:
+                process.send_signal(signum)
+            except OSError:
+                pass
+
+    for name in ("SIGTERM", "SIGHUP", "SIGQUIT"):
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            previous_handlers[signum] = signal.signal(signum, forward)
+
+    try:
+        try:
+            process = subprocess.Popen(command, stderr=subprocess.PIPE, env=env)
+        except OSError as exc:
+            print(f"error: failed to start claude: {exc}", file=sys.stderr)
+            return 127
+        for signum in pending_signals:
+            if process.poll() is None:
+                process.send_signal(signum)
+
+        assert process.stderr is not None
+        try:
+            try:
+                for line in process.stderr:
+                    if is_noise_line(line):
+                        continue
+                    try:
+                        _write_stderr_bytes(line)
+                    except (BrokenPipeError, OSError):
+                        # Our own stderr went away; keep draining the child so it
+                        # never blocks on a full pipe.
+                        pass
+            except KeyboardInterrupt:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                return 130
+        finally:
+            process.stderr.close()
+
+        return _normalize_returncode(process.wait())
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
+def _write_stderr_bytes(raw: bytes) -> None:
+    buffer = getattr(sys.stderr, "buffer", None)
+    if buffer is not None:
+        buffer.write(raw)
+        buffer.flush()
+    else:
+        sys.stderr.write(raw.decode("utf-8", "replace"))
+        sys.stderr.flush()
+
+
+def _normalize_returncode(returncode: int) -> int:
+    # A child killed by signal N reports -N; the shell convention is 128 + N.
+    return 128 - returncode if returncode < 0 else returncode
 
 
 def handle_remove(args: argparse.Namespace) -> int:
@@ -224,9 +451,8 @@ def handle_list(args: argparse.Namespace) -> int:
     print("NAME\tBASE_URL\tDEFAULT_MODEL\tAUTO_COMPACT_WINDOW\tWRAPPER\tTOKEN")
     for provider in providers:
         settings_path = settings_env_path(paths["config_dir"], provider.name)
-        if settings_path.exists():
-            settings = _read_settings(settings_path)
-        else:
+        settings = _read_settings(settings_path) if settings_path.exists() else None
+        if settings is None:
             settings = {}
         base_url = settings.get("env", {}).get("ANTHROPIC_BASE_URL", "-")
         window = settings.get("env", {}).get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "-")
@@ -241,6 +467,141 @@ def handle_list(args: argparse.Namespace) -> int:
 def handle_version(args: argparse.Namespace) -> int:
     print(__version__)
     return 0
+
+
+INSTALLER_URL = "https://raw.githubusercontent.com/felix021/claude-env/main/install.sh"
+INSTALLER_URL_WINDOWS = "https://raw.githubusercontent.com/felix021/claude-env/main/install.ps1"
+APP_DIR_RELATIVE = Path(".local") / "share" / "claude-env"
+
+
+def installer_url() -> str:
+    override = os.environ.get("CLAUDE_ENV_INSTALLER_URL")
+    if override:
+        return override
+    return INSTALLER_URL_WINDOWS if is_windows() else INSTALLER_URL
+
+
+def installer_command(script_path: Path) -> list[str]:
+    if is_windows():
+        return [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+        ]
+    return ["bash", str(script_path)]
+
+
+def installed_version(home: Path) -> str | None:
+    init_path = home / APP_DIR_RELATIVE / "claude_env" / "__init__.py"
+    try:
+        text = init_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r'^__version__ = "([^"]+)"', text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def download_installer(url: str, dest: Path) -> None:
+    with urllib.request.urlopen(url, timeout=60) as response:
+        with dest.open("wb") as f:
+            shutil.copyfileobj(response, f)
+
+
+def version_archive_url(version: str) -> str:
+    tag = version if version.startswith("v") else f"v{version}"
+    suffix = ".zip" if is_windows() else ".tar.gz"
+    return f"https://github.com/felix021/claude-env/archive/refs/tags/{tag}{suffix}"
+
+
+def restore_app_dir(app_dir: Path, backup_dir: Path) -> None:
+    """Put the pre-upgrade code back after a failed or refused install."""
+    if not backup_dir.is_dir():
+        return
+    shutil.rmtree(app_dir, ignore_errors=True)
+    shutil.copytree(backup_dir, app_dir)
+
+
+def handle_upgrade(args: argparse.Namespace) -> int:
+    paths = get_paths()
+    app_dir = paths["home"] / APP_DIR_RELATIVE
+    before = installed_version(paths["home"])
+    requested = args.version
+    url = installer_url()
+    print(f"upgrading claude-env (installed: {before or 'none'})...", flush=True)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="claude-env-upgrade-"))
+    backup_dir = tmp_dir / "backup"
+    installer_env = os.environ.copy()
+    if requested:
+        installer_env["CLAUDE_ENV_URL"] = version_archive_url(requested)
+        # A stale local source override would silently win over --version.
+        installer_env.pop("CLAUDE_ENV_SOURCE_DIR", None)
+        installer_env.pop("CLAUDE_ENV_SOURCE", None)
+
+    try:
+        if app_dir.is_dir():
+            shutil.copytree(app_dir, backup_dir)
+
+        script = tmp_dir / ("install.ps1" if is_windows() else "install.sh")
+        try:
+            download_installer(url, script)
+        except (OSError, urllib.error.URLError) as exc:
+            print(
+                f"error: failed to download installer from {url}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+        try:
+            rc = subprocess.call(installer_command(script), env=installer_env)
+        except OSError as exc:
+            print(f"error: failed to run installer: {exc}", file=sys.stderr)
+            return 127
+        if rc != 0:
+            rc = _normalize_returncode(rc)
+            restore_app_dir(app_dir, backup_dir)
+            print(f"error: installer exited with status {rc}", file=sys.stderr)
+            return rc
+
+        after = installed_version(paths["home"])
+        if (
+            requested is None
+            and before is not None
+            and after is not None
+            and version_key(after) < version_key(before)
+        ):
+            restore_app_dir(app_dir, backup_dir)
+            print(
+                f"error: refusing to downgrade claude-env {before} -> {after}"
+                f" (restored {before}); to downgrade explicitly, run"
+                f" `claude-env upgrade --version {after}`",
+                file=sys.stderr,
+            )
+            return 1
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if requested and after is not None and after.lstrip("v") != requested.lstrip("v"):
+        print(f"warning: requested {requested} but installed {after}", file=sys.stderr)
+
+    if after is None:
+        print("upgrade finished")
+    elif before is None:
+        print(f"installed claude-env {after}")
+    elif before == after:
+        print(f"claude-env {after} is already installed; reinstalled it")
+    elif version_key(after) < version_key(before):
+        print(f"downgraded claude-env {before} -> {after}")
+    else:
+        print(f"upgraded claude-env {before} -> {after}")
+    return 0
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version))
 
 
 def confirm(prompt: str) -> bool:
@@ -398,18 +759,21 @@ def settings_env_path(config_dir: Path, name: str) -> Path:
     return env_dir / f"settings.{name}.json"
 
 
-def _read_settings(settings_path: Path) -> dict:
+def _read_settings(settings_path: Path) -> dict | None:
+    """Return the parsed settings, or None when the file cannot be read."""
     try:
         with settings_path.open("r", encoding="utf-8") as f:
             settings = json.load(f)
     except (OSError, ValueError):
-        return {}
-    return settings if isinstance(settings, dict) else {}
+        return None
+    return settings if isinstance(settings, dict) else None
 
 
 def _write_settings_json(settings_path: Path, settings: dict) -> None:
     tmp_path = settings_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(settings), encoding="utf-8")
+    tmp_path.write_text(
+        json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     os.chmod(tmp_path, 0o600)
     tmp_path.replace(settings_path)
     os.chmod(settings_path, 0o600)
@@ -505,7 +869,7 @@ def migrate_storage_v2_to_v3(config_dir: Path | None = None) -> int:
             # No credentials file to hold the model; keep the providers.json fallback.
             continue
         settings = _read_settings(settings_path)
-        if not settings:
+        if settings is None:
             continue
         settings.setdefault("model", default_model)
         _write_settings_json(settings_path, settings)

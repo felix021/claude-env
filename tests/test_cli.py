@@ -10,6 +10,8 @@ from unittest import mock
 from claude_env.cli import main
 from claude_env import __version__
 from claude_env.cli import (
+    installer_command,
+    installer_url,
     main,
     migrate_storage_v1_to_v2,
     migrate_storage_v2_to_v3,
@@ -28,7 +30,15 @@ class CliTests(unittest.TestCase):
         }
         if extra_env:
             env.update(extra_env)
-        with mock.patch.dict(os.environ, env, clear=False):
+        # Drop every inherited claude-env / fake-claude setting so the result
+        # does not depend on the developer's shell.
+        base = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("CLAUDE_ENV_", "FAKE_CLAUDE_"))
+        }
+        base.update(env)
+        with mock.patch.dict(os.environ, base, clear=True):
             with mock.patch("sys.stdin", stdin):
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     code = main(argv)
@@ -74,6 +84,229 @@ class CliTests(unittest.TestCase):
             self.assertIn("glm-5.1", stdout)
             self.assertNotIn("super-secret-token", stdout)
             self.assertIn("***", stdout)
+
+    def test_settings_file_is_pretty_printed(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "secret", "-y"],
+                home=home,
+                input_text="\n",
+            )
+            settings_path = home / ".config" / "claude-env" / "env" / "settings.glm.json"
+            raw = settings_path.read_text(encoding="utf-8")
+            self.assertTrue(raw.endswith("\n"))
+            self.assertIn('\n  "', raw)
+            self.assertEqual(json.loads(raw)["env"]["ANTHROPIC_BASE_URL"], "https://provider.example/v1")
+            if os.name != "nt":
+                self.assertEqual(settings_path.stat().st_mode & 0o777, 0o600)
+
+    def test_update_changes_fields_and_preserves_other_keys(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://old.example/v1", "--token", "old-token", "--model", "old-model", "-y"],
+                home=home,
+            )
+            settings_path = home / ".config" / "claude-env" / "env" / "settings.glm.json"
+            settings = json.loads(settings_path.read_text())
+            settings["env"]["SOME_CUSTOM_KEY"] = "keep-me"
+            settings["customTopLevel"] = True
+            settings_path.write_text(json.dumps(settings))
+
+            code, stdout, stderr = self.run_cli(
+                [
+                    "update", "glm",
+                    "--url", "https://new.example/v1",
+                    "--token", "new-token",
+                    "--model", "new-model",
+                ],
+                home=home,
+            )
+
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("updated", stdout)
+            self.assertNotIn("new-token", stdout)
+            updated = json.loads(settings_path.read_text())
+            self.assertEqual(updated["env"]["ANTHROPIC_BASE_URL"], "https://new.example/v1")
+            self.assertEqual(updated["env"]["ANTHROPIC_AUTH_TOKEN"], "new-token")
+            self.assertEqual(updated["env"]["SOME_CUSTOM_KEY"], "keep-me")
+            self.assertEqual(updated["model"], "new-model")
+            self.assertTrue(updated["customTopLevel"])
+
+            code, stdout, stderr = self.run_cli(["list"], home=home)
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("https://new.example/v1", stdout)
+            self.assertIn("new-model", stdout)
+            self.assertNotIn("new-token", stdout)
+
+    def test_update_no_model_clears_default_model(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "--model", "old-model", "-y"],
+                home=home,
+            )
+
+            code, stdout, stderr = self.run_cli(["update", "glm", "--no-model"], home=home)
+
+            self.assertEqual(code, 0, stderr)
+            settings_path = home / ".config" / "claude-env" / "env" / "settings.glm.json"
+            self.assertNotIn("model", json.loads(settings_path.read_text()))
+            code, stdout, stderr = self.run_cli(["list"], home=home)
+            self.assertEqual(code, 0, stderr)
+            row = next(line for line in stdout.splitlines() if line.startswith("glm\t"))
+            self.assertEqual(row.split("\t")[2], "-")
+            self.assertEqual(row.split("\t")[3], "-")
+
+    def test_update_no_model_clears_legacy_default_model(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+            config_dir = home / ".config" / "claude-env"
+            data = json.loads((config_dir / "providers.json").read_text())
+            data["providers"]["glm"]["default_model"] = "legacy-model"
+            (config_dir / "providers.json").write_text(json.dumps(data))
+
+            code, stdout, stderr = self.run_cli(["update", "glm", "--no-model"], home=home)
+
+            self.assertEqual(code, 0, stderr)
+            data = json.loads((config_dir / "providers.json").read_text())
+            self.assertIsNone(data["providers"]["glm"]["default_model"])
+            code, stdout, stderr = self.run_cli(["list"], home=home)
+            row = next(line for line in stdout.splitlines() if line.startswith("glm\t"))
+            self.assertEqual(row.split("\t")[2], "-")
+
+    def test_update_auto_compact_window_and_clear(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+            settings_path = home / ".config" / "claude-env" / "env" / "settings.glm.json"
+
+            code, stdout, stderr = self.run_cli(
+                ["update", "glm", "--auto-compact-window", "200000"], home=home
+            )
+            self.assertEqual(code, 0, stderr)
+            settings = json.loads(settings_path.read_text())
+            self.assertEqual(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "200000")
+
+            code, stdout, stderr = self.run_cli(
+                ["update", "glm", "--no-auto-compact-window"], home=home
+            )
+            self.assertEqual(code, 0, stderr)
+            settings = json.loads(settings_path.read_text())
+            self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", settings["env"])
+
+    def test_update_requires_at_least_one_option(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+
+            code, stdout, stderr = self.run_cli(["update", "glm"], home=home)
+
+            self.assertEqual(code, 2)
+            self.assertIn("nothing to update", stderr)
+
+    def test_update_unknown_provider(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            code, stdout, stderr = self.run_cli(
+                ["update", "missing", "--model", "m"], home=home
+            )
+
+            self.assertEqual(code, 1)
+            self.assertIn("not configured", stderr)
+
+    def test_update_rejects_empty_values_and_bad_window(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+
+            for args, message in (
+                (["update", "glm", "--url", ""], "--url must not be empty"),
+                (["update", "glm", "--token", ""], "--token must not be empty"),
+                (["update", "glm", "--model", ""], "--model must not be empty"),
+                (["update", "glm", "--auto-compact-window", "0"], "must be a positive integer"),
+            ):
+                code, stdout, stderr = self.run_cli(args, home=home)
+                self.assertEqual(code, 2, args)
+                self.assertIn(message, stderr)
+
+    def test_update_model_flags_are_mutually_exclusive(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli(["update", "glm", "--model", "m", "--no-model"], home=home)
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_update_requires_settings_file(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+            (home / ".config" / "claude-env" / "env" / "settings.glm.json").unlink()
+
+            code, stdout, stderr = self.run_cli(["update", "glm", "--model", "m"], home=home)
+
+            self.assertEqual(code, 1)
+            self.assertIn("not found", stderr)
+
+    def test_update_accepts_empty_settings_object(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+            settings_path = home / ".config" / "claude-env" / "env" / "settings.glm.json"
+            settings_path.write_text("{}\n")
+
+            code, stdout, stderr = self.run_cli(
+                ["update", "glm", "--model", "new-model"], home=home
+            )
+
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(json.loads(settings_path.read_text())["model"], "new-model")
+
+    def test_update_refuses_non_object_env(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            self.run_cli(
+                ["add", "glm", "--url", "https://provider.example/v1", "--token", "token", "-y"],
+                home=home,
+                input_text="\n",
+            )
+            settings_path = home / ".config" / "claude-env" / "env" / "settings.glm.json"
+            settings_path.write_text(json.dumps({"env": "broken"}))
+
+            code, stdout, stderr = self.run_cli(
+                ["update", "glm", "--model", "m"], home=home
+            )
+
+            self.assertEqual(code, 2)
+            self.assertIn("env must be an object", stderr)
+            self.assertEqual(json.loads(settings_path.read_text())["env"], "broken")
 
     def test_add_prompts_for_missing_url_and_token(self):
         with TemporaryDirectory() as temp:
@@ -214,6 +447,297 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0, stderr)
             self.assertEqual(stdout.strip(), __version__)
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_runs_downloaded_installer_and_reports_new_version(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            installer = home / "fake-install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                'app_dir="${CLAUDE_ENV_HOME}/.local/share/claude-env"\n'
+                'mkdir -p "${app_dir}/claude_env"\n'
+                'printf \'__version__ = "9.9.9"\\n\' > "${app_dir}/claude_env/__init__.py"\n',
+                encoding="utf-8",
+            )
+            (home / ".local" / "share" / "claude-env" / "claude_env").mkdir(parents=True)
+            (home / ".local" / "share" / "claude-env" / "claude_env" / "__init__.py").write_text(
+                '__version__ = "0.1.0"\n', encoding="utf-8"
+            )
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("upgraded claude-env 0.1.0 -> 9.9.9", stdout)
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_reports_unchanged_version(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            app_dir = home / ".local" / "share" / "claude-env" / "claude_env"
+            app_dir.mkdir(parents=True)
+            (app_dir / "__init__.py").write_text(
+                f'__version__ = "{__version__}"\n', encoding="utf-8"
+            )
+            installer = home / "fake-install.sh"
+            installer.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+
+            self.assertEqual(code, 0, stderr)
+            self.assertIn(f"claude-env {__version__} is already installed", stdout)
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_returns_installer_exit_code(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            installer = home / "fake-install.sh"
+            installer.write_text("#!/usr/bin/env bash\nexit 3\n", encoding="utf-8")
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+
+            self.assertEqual(code, 3)
+            self.assertIn("installer exited with status 3", stderr)
+
+    def test_upgrade_reports_download_failure(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            missing = home / "missing-install.sh"
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": missing.as_uri()},
+            )
+
+            self.assertEqual(code, 1)
+            self.assertIn("failed to download installer", stderr)
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_reports_first_install_and_missing_version(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+
+            installer = home / "fake-install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\n"
+                'app_dir="${CLAUDE_ENV_HOME}/.local/share/claude-env"\n'
+                'mkdir -p "${app_dir}/claude_env"\n'
+                'printf \'__version__ = "1.2.3"\\n\' > "${app_dir}/claude_env/__init__.py"\n',
+                encoding="utf-8",
+            )
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("installed claude-env 1.2.3", stdout)
+
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            silent = home / "silent-install.sh"
+            silent.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": silent.as_uri()},
+            )
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("upgrade finished", stdout)
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_reports_signal_exit_as_128_plus_signal(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            installer = home / "killed-install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\nkill -TERM $$\n", encoding="utf-8"
+            )
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+
+            self.assertEqual(code, 143)
+            self.assertIn("installer exited with status 143", stderr)
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_refuses_downgrade_and_restores_previous_version(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            app_dir = home / ".local" / "share" / "claude-env" / "claude_env"
+            app_dir.mkdir(parents=True)
+            init_file = app_dir / "__init__.py"
+            init_file.write_text('__version__ = "2.0.0"\n', encoding="utf-8")
+            installer = home / "fake-install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\n"
+                'app_dir="${CLAUDE_ENV_HOME}/.local/share/claude-env"\n'
+                'printf \'__version__ = "1.0.0"\\n\' > "${app_dir}/claude_env/__init__.py"\n',
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+
+            self.assertEqual(code, 1)
+            self.assertIn("refusing to downgrade claude-env 2.0.0 -> 1.0.0", stderr)
+            self.assertIn("--version 1.0.0", stderr)
+            self.assertEqual(init_file.read_text(), '__version__ = "2.0.0"\n')
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_allows_downgrade_with_explicit_version(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            app_dir = home / ".local" / "share" / "claude-env" / "claude_env"
+            app_dir.mkdir(parents=True)
+            (app_dir / "__init__.py").write_text('__version__ = "2.0.0"\n', encoding="utf-8")
+            installer = home / "fake-install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\n"
+                'app_dir="${CLAUDE_ENV_HOME}/.local/share/claude-env"\n'
+                'mkdir -p "${app_dir}/claude_env"\n'
+                'printf \'__version__ = "1.0.0"\\n\' > "${app_dir}/claude_env/__init__.py"\n',
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade", "--version", "1.0.0"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("downgraded claude-env 2.0.0 -> 1.0.0", stdout)
+            self.assertNotIn("warning:", stderr)
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_version_sets_archive_url_and_clears_source_overrides(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            installer = home / "fake-install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "%s\\n%s\\n" "${CLAUDE_ENV_URL:-}" "${CLAUDE_ENV_SOURCE_DIR:-}"'
+                ' > "${CLAUDE_ENV_HOME}/installer_env.txt"\n',
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade", "--version", "v0.5.0"],
+                home=home,
+                extra_env={
+                    "CLAUDE_ENV_INSTALLER_URL": installer.as_uri(),
+                    "CLAUDE_ENV_SOURCE_DIR": "/stale/source",
+                },
+            )
+
+            self.assertEqual(code, 0, stderr)
+            archive_url, source_dir = (
+                (home / "installer_env.txt").read_text().splitlines()
+            )
+            self.assertTrue(archive_url.endswith("/refs/tags/v0.5.0.tar.gz"))
+            self.assertEqual(source_dir, "")
+
+    @unittest.skipIf(os.name == "nt", "fake installer is a POSIX shell script")
+    def test_upgrade_restores_previous_version_when_installer_fails(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            app_dir = home / ".local" / "share" / "claude-env" / "claude_env"
+            app_dir.mkdir(parents=True)
+            init_file = app_dir / "__init__.py"
+            init_file.write_text('__version__ = "2.0.0"\n', encoding="utf-8")
+            installer = home / "broken-install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\n"
+                'app_dir="${CLAUDE_ENV_HOME}/.local/share/claude-env"\n'
+                'printf \'__version__ = "9.9.9"\\n\' > "${app_dir}/claude_env/__init__.py"\n'
+                "exit 3\n",
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={"CLAUDE_ENV_INSTALLER_URL": installer.as_uri()},
+            )
+
+            self.assertEqual(code, 3)
+            self.assertIn("installer exited with status 3", stderr)
+            self.assertEqual(init_file.read_text(), '__version__ = "2.0.0"\n')
+
+    def test_upgrade_reports_missing_installer_program(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            script = home / "install.sh"
+            script.write_text("exit 0\n", encoding="utf-8")
+            empty_bin = home / "empty-bin"
+            empty_bin.mkdir()
+
+            code, stdout, stderr = self.run_cli(
+                ["upgrade"],
+                home=home,
+                extra_env={
+                    "CLAUDE_ENV_INSTALLER_URL": script.as_uri(),
+                    "PATH": str(empty_bin),
+                },
+            )
+
+            self.assertEqual(code, 127)
+            self.assertIn("failed to run installer", stderr)
+            self.assertNotIn("Traceback", stderr)
+
+    def test_installer_url_per_platform(self):
+        with mock.patch.dict(
+            os.environ,
+            {"CLAUDE_ENV_PLATFORM": "windows", "CLAUDE_ENV_INSTALLER_URL": ""},
+        ):
+            self.assertTrue(installer_url().endswith("install.ps1"))
+
+        with mock.patch.dict(
+            os.environ,
+            {"CLAUDE_ENV_PLATFORM": "posix", "CLAUDE_ENV_INSTALLER_URL": ""},
+        ):
+            self.assertTrue(installer_url().endswith("install.sh"))
+
+        with mock.patch.dict(
+            os.environ, {"CLAUDE_ENV_INSTALLER_URL": "https://mirror.example/install.sh"}
+        ):
+            self.assertEqual(installer_url(), "https://mirror.example/install.sh")
+
+    def test_installer_command_per_platform(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_ENV_PLATFORM": "posix"}):
+            self.assertEqual(
+                installer_command(Path("/tmp/install.sh")),
+                ["bash", "/tmp/install.sh"],
+            )
+
+        with mock.patch.dict(os.environ, {"CLAUDE_ENV_PLATFORM": "windows"}):
+            command = installer_command(Path("C:/tmp/install.ps1"))
+            self.assertEqual(
+                command[:4],
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"],
+            )
+            self.assertEqual(command[-2:], ["-File", "C:/tmp/install.ps1"])
 
     def test_add_creates_settings_file_with_0600_permissions(self):
         import stat

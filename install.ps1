@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$HomeDir = [Environment]::GetFolderPath("UserProfile")
+$HomeDir = if ($env:CLAUDE_ENV_HOME) { $env:CLAUDE_ENV_HOME } else { [Environment]::GetFolderPath("UserProfile") }
 $InstallDir = Join-Path $HomeDir ".local\bin"
 $AppDir = Join-Path $HomeDir ".local\share\claude-env"
 $Target = Join-Path $InstallDir "claude-env.cmd"
