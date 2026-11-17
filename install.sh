@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-install_dir="${HOME}/.local/bin"
+home_dir="${CLAUDE_ENV_HOME:-${HOME}}"
+install_dir="${home_dir}/.local/bin"
 target="${install_dir}/claude-env"
-app_dir="${HOME}/.local/share/claude-env"
+app_dir="${home_dir}/.local/share/claude-env"
 source_url="${CLAUDE_ENV_URL:-https://github.com/felix021/claude-env/archive/refs/heads/main.tar.gz}"
 
 mkdir -p "${install_dir}"
@@ -58,7 +59,7 @@ echo "installed ${target}"
 
 # Run one-time storage migrations (v1 -> v2: url/token; v2 -> v3: default model)
 if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
-  export CLAUDE_ENV_HOME="${HOME}"
+  export CLAUDE_ENV_HOME="${home_dir}"
   _pycmd="python3"
   command -v python3 >/dev/null 2>&1 || _pycmd="python"
   "$_pycmd" -c "
@@ -76,13 +77,13 @@ case ":${PATH}:" in
     shell_name="$(basename "${SHELL:-}")"
     case "${shell_name}" in
       zsh)
-        echo "Add this to ~/.zshrc: export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo "Add this to ~/.zshrc: export PATH=\"${install_dir}:\$PATH\""
         ;;
       bash)
-        echo "Add this to ~/.bashrc: export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo "Add this to ~/.bashrc: export PATH=\"${install_dir}:\$PATH\""
         ;;
       *)
-        echo "Add this to your shell profile: export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo "Add this to your shell profile: export PATH=\"${install_dir}:\$PATH\""
         ;;
     esac
     ;;

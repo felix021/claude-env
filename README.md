@@ -10,8 +10,11 @@
 
 - 管理多个 Claude Code Provider 配置。
 - 为每个 Provider 设置可选默认模型。
+- 更新已有 Provider 的 URL、Token、默认模型和自动压缩窗口。
 - 为小上下文 Provider 设置 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（自动压缩窗口）。
 - 通过 `claude-env run <name> ...` 运行 Claude Code。
+- 自动屏蔽第三方 Provider 场景下无用的 stderr 提示。
+- 通过 `claude-env upgrade` 一键升级。
 - 创建无密钥快捷命令，例如 `claude-glm`、`claude-qwen`。
 - 运行时传入的 `--model` 会覆盖默认模型。
 - 支持 Linux/macOS 的 `install.sh`。
@@ -92,13 +95,46 @@ claude-env add glm \
   --auto-compact-window 118784
 ```
 
-这个值直接填 Provider 的最大上下文（max ctx）即可，不需要为压缩摘要的输出预留余量：Claude Code 内部会从该窗口预留 autocompact buffer（实测约 33k token，固定值、不随窗口大小变化），并在到达上限之前触发压缩。注意该设置的优先级高于会话内的 `/autocompact` 命令，要调整需重新运行 `claude-env add`。
+这个值直接填 Provider 的最大上下文（max ctx）即可，不需要为压缩摘要的输出预留余量：Claude Code 内部会从该窗口预留 autocompact buffer（实测约 33k token，固定值、不随窗口大小变化），并在到达上限之前触发压缩。注意该设置的优先级高于会话内的 `/autocompact` 命令；要调整请运行 `claude-env update <name> --auto-compact-window <tokens>`。
 
 查看配置:
 
 ```bash
 claude-env list
 ```
+
+更新已有 Provider（只改传入的字段，未传入的保持原值）：
+
+```bash
+claude-env update glm \
+  --url "https://new-provider.example/api/anthropic" \
+  --token "new-token" \
+  --model "glm-5.1" \
+  --auto-compact-window 200000
+```
+
+清除默认模型或自动压缩窗口：
+
+```bash
+claude-env update glm --no-model
+claude-env update glm --no-auto-compact-window
+```
+
+`update` 不会交互式询问缺失字段，也不会改动快捷命令本身。`env/settings.<name>.json` 以 2 空格缩进、末尾带换行的格式保存，便于直接阅读和复制。
+
+升级 claude-env（下载最新安装脚本并重新安装，已有 Provider 配置不受影响）：
+
+```bash
+claude-env upgrade
+```
+
+默认从 GitHub `main` 分支安装。默认只允许升级：如果目标版本比当前已安装版本低，`upgrade` 会恢复旧版本并报错退出，不会悄悄降级。确实需要降级时显式指定版本：
+
+```bash
+claude-env upgrade --version 0.5.0
+```
+
+`CLAUDE_ENV_INSTALLER_URL` 可替换安装脚本地址，`CLAUDE_ENV_URL` 可替换源码归档地址（例如使用镜像）。与 `install.sh` 的用法一致，升级会执行该地址提供的内容。
 
 运行 Provider:
 
@@ -134,6 +170,19 @@ claude-env remove glm
 claude-env rm glm
 claude-env delete glm
 claude-env del glm
+```
+
+## stderr 噪音屏蔽
+
+第三方 Provider 场景下，Claude Code 会输出一些与使用无关的提示，`claude-env` 会处理掉：
+
+- `⚠ claude.ai connectors are disabled ...`：启动子进程时设置 `ENABLE_CLAUDEAI_MCP_SERVERS=0`，让 Claude Code 直接跳过 claude.ai connector 加载，告警不再出现。如果你显式导出了该变量，则以你的设置为准。
+- `[claude-code:unrecognized_model] ...` 和 `We're changing auto mode to no longer charge for classifier requests ...`：这两条没有官方开关。`run` 在 headless 模式（`-p` / `--print` / `--output-format` / `--input-format`）下按行过滤 stderr，只屏蔽这两类固定内容，其余 stderr 原样输出。交互式 TUI 模式不做过滤。
+
+排障时如果需要看原始 stderr：
+
+```bash
+CLAUDE_ENV_NO_STDERR_FILTER=1 claude-glm -p "say ok"
 ```
 
 ## 文件位置

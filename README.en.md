@@ -10,8 +10,11 @@ Shortcuts do not contain URLs or tokens. Sensitive values live in the local conf
 
 - Manage multiple Claude Code provider profiles.
 - Configure an optional default model per provider.
+- Update an existing provider's URL, token, default model, and auto-compact window.
 - Set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (the auto-compact window) for providers with a small context window.
 - Run Claude Code through `claude-env run <name> ...`.
+- Suppress useless stderr notices that only apply to third-party providers.
+- Upgrade with a single `claude-env upgrade` command.
 - Create token-free shortcuts such as `claude-glm` and `claude-qwen`.
 - Let runtime `--model` override the configured default model.
 - Support Linux/macOS through `install.sh`.
@@ -92,13 +95,46 @@ claude-env add glm \
   --auto-compact-window 118784
 ```
 
-Set this to the provider's hard max context size as-is; there is no need to reserve room for the compact summary: Claude Code keeps its own autocompact buffer (about 33k tokens in practice, a fixed amount independent of the window size) and compacts before the limit is reached. Note this setting takes precedence over the in-session `/autocompact` command; to change it, re-run `claude-env add`.
+Set this to the provider's hard max context size as-is; there is no need to reserve room for the compact summary: Claude Code keeps its own autocompact buffer (about 33k tokens in practice, a fixed amount independent of the window size) and compacts before the limit is reached. Note this setting takes precedence over the in-session `/autocompact` command; to change it, run `claude-env update <name> --auto-compact-window <tokens>`.
 
 List profiles:
 
 ```bash
 claude-env list
 ```
+
+Update an existing provider (only the fields you pass are changed):
+
+```bash
+claude-env update glm \
+  --url "https://new-provider.example/api/anthropic" \
+  --token "new-token" \
+  --model "glm-5.1" \
+  --auto-compact-window 200000
+```
+
+Clear the default model or the auto-compact window:
+
+```bash
+claude-env update glm --no-model
+claude-env update glm --no-auto-compact-window
+```
+
+`update` never prompts for missing fields and does not touch the shortcut itself. `env/settings.<name>.json` is saved with 2-space indentation and a trailing newline so it stays easy to read and copy.
+
+Upgrade claude-env (downloads the latest installer and reinstalls; existing provider profiles are kept):
+
+```bash
+claude-env upgrade
+```
+
+It installs from the GitHub `main` branch by default and only upgrades: if the target version is lower than the installed one, `upgrade` restores the previous installation and exits with an error instead of silently downgrading. To downgrade on purpose, name the version explicitly:
+
+```bash
+claude-env upgrade --version 0.5.0
+```
+
+`CLAUDE_ENV_INSTALLER_URL` overrides the installer script URL and `CLAUDE_ENV_URL` overrides the source archive URL (useful for mirrors). As with `install.sh`, the upgrade executes whatever the URL provides.
 
 Run a provider:
 
@@ -134,6 +170,19 @@ Aliases:
 claude-env rm glm
 claude-env delete glm
 claude-env del glm
+```
+
+## stderr Noise Suppression
+
+With third-party providers, Claude Code prints some notices that are irrelevant to usage. `claude-env` handles them:
+
+- `⚠ claude.ai connectors are disabled ...`: the child process is started with `ENABLE_CLAUDEAI_MCP_SERVERS=0`, so Claude Code skips loading claude.ai connectors and the warning disappears. If you export that variable yourself, your value wins.
+- `[claude-code:unrecognized_model] ...` and `We're changing auto mode to no longer charge for classifier requests ...`: these have no supported switch. In headless mode (`-p` / `--print` / `--output-format` / `--input-format`), `run` filters stderr line by line and drops only these two kinds of messages; all other stderr passes through unchanged. The interactive TUI mode is not filtered.
+
+To see the original stderr while troubleshooting:
+
+```bash
+CLAUDE_ENV_NO_STDERR_FILTER=1 claude-glm -p "say ok"
 ```
 
 ## File Locations
