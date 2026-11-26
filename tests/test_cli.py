@@ -1002,6 +1002,34 @@ class CliTests(unittest.TestCase):
                 (home / ".config" / "claude-env" / "env" / "settings.glm.json").exists()
             )
 
+    def test_underscore_migrate_command_runs_all_migrations(self):
+        with TemporaryDirectory() as temp:
+            home = Path(temp)
+            config_dir = home / ".config" / "claude-env"
+            config_dir.mkdir(parents=True)
+            (config_dir / "providers.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "providers": {
+                        "glm": {
+                            "base_url": "https://provider.example/v1",
+                            "token": "secret-token",
+                            "default_model": "glm-5-turbo",
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = self.run_cli(["_migrate"], home=home)
+
+            self.assertEqual(code, 0, stderr)
+            data = json.loads((config_dir / "providers.json").read_text())
+            self.assertEqual(data["version"], 3)
+            settings = json.loads((config_dir / "env" / "settings.glm.json").read_text())
+            self.assertEqual(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "secret-token")
+            self.assertEqual(settings["model"], "glm-5-turbo")
+
     def test_migrate_v2_to_v3_moves_model_into_settings(self):
         with TemporaryDirectory() as temp:
             home = Path(temp)

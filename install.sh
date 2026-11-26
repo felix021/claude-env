@@ -23,11 +23,14 @@ EOF
   chmod +x "${target}"
 }
 
+installed_package=0
+
 if [[ -n "${CLAUDE_ENV_SOURCE_DIR:-}" ]]; then
   rm -rf "${app_dir}"
   mkdir -p "${app_dir}"
   cp -R "${CLAUDE_ENV_SOURCE_DIR}/claude_env" "${app_dir}/"
   write_launcher
+  installed_package=1
 elif [[ -n "${CLAUDE_ENV_SOURCE:-}" ]]; then
   cp "${CLAUDE_ENV_SOURCE}" "${target}"
   chmod +x "${target}"
@@ -53,21 +56,17 @@ else
   mkdir -p "${app_dir}"
   cp -R "${source_root}/claude_env" "${app_dir}/"
   write_launcher
+  installed_package=1
 fi
 
 echo "installed ${target}"
 
 # Run one-time storage migrations (v1 -> v2: url/token; v2 -> v3: default model)
-if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+# through the launcher just installed. The install path is never embedded in
+# Python source, so it cannot be mangled by quoting or escape sequences.
+if [[ "${installed_package}" == "1" ]]; then
   export CLAUDE_ENV_HOME="${home_dir}"
-  _pycmd="python3"
-  command -v python3 >/dev/null 2>&1 || _pycmd="python"
-  "$_pycmd" -c "
-import sys
-sys.path.insert(0, '${app_dir}')
-from claude_env.cli import migrate_storage
-migrate_storage()
-" 2>/dev/null || true
+  "${target}" _migrate 2>/dev/null || true
 fi
 
 case ":${PATH}:" in

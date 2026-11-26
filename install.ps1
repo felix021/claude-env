@@ -94,16 +94,22 @@ Set-Content -Path $Target -Value $Launcher -Encoding ASCII
 Write-Output "installed $Target"
 
 # Run one-time storage migrations (v1 -> v2: url/token; v2 -> v3: default model)
+# through the launcher just installed above. Do not inline Python code that
+# embeds $AppDir: a Windows path like C:\Users\name contains backslashes, and
+# Python reads \U, \A, ... inside a string literal as escape sequences, so the
+# script dies with SyntaxError before the migration runs.
 $Env:CLAUDE_ENV_HOME = $HomeDir
-$migrateScript = "import sys; sys.path.insert(0, '$AppDir'); from claude_env.cli import migrate_storage; migrate_storage()"
-$Py = Get-Command py -ErrorAction SilentlyContinue
-if ($Py) {
-    & py -3 -c $migrateScript 2>$null
-} else {
-    $Python = Get-Command python -ErrorAction SilentlyContinue
-    if ($Python) {
-        & python -c $migrateScript 2>$null
+$PreviousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & $Target _migrate
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "storage migration exited with code $LASTEXITCODE"
     }
+} catch {
+    Write-Warning "storage migration skipped: $($_.Exception.Message)"
+} finally {
+    $ErrorActionPreference = $PreviousErrorAction
 }
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $PathEntries = @()

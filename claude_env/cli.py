@@ -113,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upgrade_cmd.set_defaults(handler=handle_upgrade)
 
+    # Internal entry point for the installers. They run migrations through the
+    # installed launcher instead of inlining Python code with an install path,
+    # which breaks on Windows paths ("C:\Users\..." has \U, \A, ... escapes).
+    migrate_cmd = subparsers.add_parser("_migrate", help=argparse.SUPPRESS)
+    migrate_cmd.set_defaults(handler=handle_migrate)
+
     return parser
 
 
@@ -602,6 +608,11 @@ def handle_upgrade(args: argparse.Namespace) -> int:
 
 def version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+def handle_migrate(args: argparse.Namespace) -> int:
+    migrate_storage()
+    return 0
 
 
 def confirm(prompt: str) -> bool:
